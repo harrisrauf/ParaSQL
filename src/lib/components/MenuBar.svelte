@@ -28,6 +28,7 @@
     action?: () => void;
     disabled?: boolean;
     separator?: boolean;
+    checked?: boolean;
     submenu?: SubItem[];
   }
 

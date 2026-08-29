@@ -37,7 +37,7 @@
     inputValue = formatValue(value);
     if (inputEl) {
       inputEl.focus();
-      inputEl.select();
+      if (inputEl instanceof HTMLInputElement) inputEl.select();
     }
   });
 </script>

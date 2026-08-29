@@ -45,7 +45,7 @@
     dropdown = dropdown === name ? null : name;
   }
 
-  async function runAction(fn: () => Promise<void>) {
+  async function runAction(fn: () => Promise<unknown>) {
     dropdown = null;
     await fn();
     refreshUndoRedo();
