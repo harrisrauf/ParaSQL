@@ -77,8 +77,8 @@ export async function sortBy(colName: string, ascending: boolean): Promise<RowDa
   return invoke('sort_by', { col_name: colName, ascending });
 }
 
-export async function generateSchema(): Promise<string> {
-  return invoke('generate_schema');
+export async function generateSchema(dialect: string = 'duckdb'): Promise<string> {
+  return invoke('generate_schema', { dialect });
 }
 
 export async function undo(): Promise<void> {

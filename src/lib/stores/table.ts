@@ -1,12 +1,24 @@
 import { writable, derived } from 'svelte/store';
 import type { ColumnInfo, RowData, SortConfig, SearchConfig, SortDirection, QueryResult } from '../types';
+import { getPage } from '../commands';
+
+const LOAD_CHUNK = 10_000;
+const INITIAL_LOAD_THRESHOLD = 50_000;
+
+interface SelectionState {
+  anchor: { rowId: number; colIdx: number } | null;
+  cells: Set<string>;
+  allRows: boolean;
+}
 
 interface TableState {
   columns: ColumnInfo[];
   rows: RowData[];
-  selectedRowIds: Set<number>;
   sort: SortConfig;
   search: SearchConfig;
+  filters: Record<string, Set<string | null>>;
+  columnWidths: Record<string, number>;
+  selection: SelectionState;
   modified: boolean;
   filePath: string | null;
   totalRows: number;
@@ -15,15 +27,22 @@ interface TableState {
   sqlResult: QueryResult | null;
   savedTable: { columns: ColumnInfo[]; rows: RowData[]; totalRows: number } | null;
   activeTab: 'data' | 'schema' | 'query' | 'metadata';
+  loadingMore: boolean;
+}
+
+function emptySelection(): SelectionState {
+  return { anchor: null, cells: new Set(), allRows: false };
 }
 
 function createTableStore() {
   const { subscribe, set, update } = writable<TableState>({
     columns: [],
     rows: [],
-    selectedRowIds: new Set(),
     sort: { column: '', direction: null },
     search: { query: '', column: null },
+    filters: {},
+    columnWidths: {},
+    selection: emptySelection(),
     modified: false,
     filePath: null,
     totalRows: 0,
@@ -32,6 +51,7 @@ function createTableStore() {
     sqlResult: null,
     savedTable: null,
     activeTab: 'data',
+    loadingMore: false,
   });
 
   function toggleSort(column: string) {
@@ -65,13 +85,15 @@ function createTableStore() {
         rows: result.rows,
         totalRows: result.rows.length,
         sqlResult: result,
+        filters: {},
+        selection: emptySelection(),
       };
     });
   }
 
   function restoreTable() {
     update(state => {
-      if (!state.savedTable) return { ...state, sqlResult: null };
+      if (!state.savedTable) return { ...state, sqlResult: null, filters: {}, selection: emptySelection() };
       return {
         ...state,
         columns: state.savedTable.columns,
@@ -79,6 +101,8 @@ function createTableStore() {
         totalRows: state.savedTable.totalRows,
         savedTable: null,
         sqlResult: null,
+        filters: {},
+        selection: emptySelection(),
       };
     });
   }
@@ -95,22 +119,26 @@ function createTableStore() {
     update(state => ({ ...state, totalRows: total }));
   }
 
-  function selectRow(rowId: number, shift = false, ctrl = false) {
-    update(state => {
-      const newSet = new Set(state.selectedRowIds);
-      if (ctrl) {
-        if (newSet.has(rowId)) newSet.delete(rowId);
-        else newSet.add(rowId);
-      } else {
-        newSet.clear();
-        newSet.add(rowId);
-      }
-      return { ...state, selectedRowIds: newSet };
+  /** Fresh state for a newly opened file/folder */
+  function open(columns: ColumnInfo[], rows: RowData[], totalRows: number, filePath: string | null) {
+    set({
+      columns,
+      rows,
+      sort: { column: '', direction: null },
+      search: { query: '', column: null },
+      filters: {},
+      columnWidths: {},
+      selection: emptySelection(),
+      modified: false,
+      filePath,
+      totalRows,
+      pageSize: 500,
+      currentPage: 0,
+      sqlResult: null,
+      savedTable: null,
+      activeTab: 'data',
+      loadingMore: false,
     });
-  }
-
-  function clearSelection() {
-    update(state => ({ ...state, selectedRowIds: new Set() }));
   }
 
   function updateRow(rowId: number, newRow: RowData) {
@@ -124,14 +152,141 @@ function createTableStore() {
     update(state => {
       const removeSet = new Set(rowIds);
       const rows = state.rows.filter(r => !removeSet.has(r.row_id));
-      return { ...state, rows };
+      const cells = new Set(
+        [...state.selection.cells].filter(k => !removeSet.has(Number(k.slice(0, k.indexOf(':')))))
+      );
+      return {
+        ...state,
+        rows,
+        selection: { anchor: null, cells, allRows: state.selection.allRows },
+        totalRows: Math.max(0, state.totalRows - removeSet.size),
+      };
     });
+  }
+
+  // --- Selection (cell-based, Excel-like) ---
+
+  function selectCell(rowId: number, colIdx: number) {
+    update(state => ({
+      ...state,
+      selection: { anchor: { rowId, colIdx }, cells: new Set([`${rowId}:${colIdx}`]), allRows: false },
+    }));
+  }
+
+  function toggleCell(rowId: number, colIdx: number) {
+    update(state => {
+      const key = `${rowId}:${colIdx}`;
+      const cells = new Set(state.selection.cells);
+      if (cells.has(key)) cells.delete(key);
+      else cells.add(key);
+      return { ...state, selection: { anchor: { rowId, colIdx }, cells, allRows: false } };
+    });
+  }
+
+  /** Select a whole row (click on row-id cell) */
+  function selectRow(rowId: number, _shift = false, _ctrl = false) {
+    update(state => {
+      const cells = new Set<string>();
+      for (let c = 0; c < state.columns.length; c++) cells.add(`${rowId}:${c}`);
+      return { ...state, selection: { anchor: { rowId, colIdx: 0 }, cells, allRows: false } };
+    });
+  }
+
+  /** Rectangle selection between anchor and end, over the given (displayed) row order */
+  function setRange(anchorRowId: number, anchorColIdx: number, endRowId: number, endColIdx: number, rowOrder: number[], colCount: number) {
+    update(state => {
+      const aIdx = rowOrder.indexOf(anchorRowId);
+      const eIdx = rowOrder.indexOf(endRowId);
+      if (aIdx < 0 || eIdx < 0) return state;
+      const rMin = Math.min(aIdx, eIdx);
+      const rMax = Math.max(aIdx, eIdx);
+      const cMin = Math.min(anchorColIdx, endColIdx);
+      const cMax = Math.max(anchorColIdx, endColIdx);
+      const cells = new Set<string>();
+      for (let i = rMin; i <= rMax; i++) {
+        const rid = rowOrder[i];
+        for (let c = cMin; c <= cMax; c++) cells.add(`${rid}:${c}`);
+      }
+      return { ...state, selection: { anchor: { rowId: anchorRowId, colIdx: anchorColIdx }, cells, allRows: false } };
+    });
+  }
+
+  function selectAll() {
+    update(state => {
+      const total = state.rows.length * state.columns.length;
+      if (total <= 100_000) {
+        const cells = new Set<string>();
+        for (const r of state.rows) {
+          for (let c = 0; c < state.columns.length; c++) cells.add(`${r.row_id}:${c}`);
+        }
+        return { ...state, selection: { anchor: null, cells, allRows: false } };
+      }
+      return { ...state, selection: { anchor: null, cells: new Set(), allRows: true } };
+    });
+  }
+
+  function clearSelection() {
+    update(state => ({ ...state, selection: emptySelection() }));
+  }
+
+  // --- Column widths ---
+
+  function setColumnWidth(name: string, width: number) {
+    update(state => ({ ...state, columnWidths: { ...state.columnWidths, [name]: width } }));
+  }
+
+  // --- Filters ---
+
+  function toggleFilter(colName: string, value: string | null) {
+    update(state => {
+      const current = state.filters[colName] ?? new Set<string | null>();
+      const next = new Set(current);
+      if (next.has(value)) next.delete(value);
+      else next.add(value);
+      return { ...state, filters: { ...state.filters, [colName]: next } };
+    });
+  }
+
+  function setFilter(colName: string, values: Set<string | null>) {
+    update(state => ({ ...state, filters: { ...state.filters, [colName]: values } }));
+  }
+
+  function clearFilters() {
+    update(state => ({ ...state, filters: {} }));
+  }
+
+  // --- Progressive loading for large files ---
+
+  async function loadMore() {
+    const state = getCurrent();
+    if (state.loadingMore) return;
+    if (state.sqlResult !== null || state.rows.length >= state.totalRows) return;
+    update(s => ({ ...s, loadingMore: true }));
+    try {
+      const page = await getPage(state.rows.length, LOAD_CHUNK);
+      update(s => {
+        if (page.length === 0) return { ...s, loadingMore: false };
+        const seen = new Set(s.rows.map(r => r.row_id));
+        const fresh = page.filter(r => !seen.has(r.row_id));
+        return { ...s, rows: [...s.rows, ...fresh], loadingMore: false };
+      });
+    } catch (err) {
+      console.error('Failed to load more rows:', err);
+      update(s => ({ ...s, loadingMore: false }));
+    }
+  }
+
+  function getCurrent(): TableState {
+    let value: TableState;
+    subscribe(v => value = v)();
+    return value!;
   }
 
   return {
     subscribe,
     set: (val: TableState) => set(val),
     update,
+    open,
     toggleSort,
     setSearch,
     setSqlResult,
@@ -140,18 +295,76 @@ function createTableStore() {
     setActiveTab,
     setRows,
     setTotalRows,
-    selectRow,
-    clearSelection,
     updateRow,
     removeRows,
+    selectCell,
+    toggleCell,
+    selectRow,
+    setRange,
+    selectAll,
+    clearSelection,
+    setColumnWidth,
+    toggleFilter,
+    setFilter,
+    clearFilters,
+    loadMore,
   };
 }
 
 export const tableStore = createTableStore();
 
+export const initialLoadThreshold = INITIAL_LOAD_THRESHOLD;
+
+/** Row ids that have at least one selected cell (or all rows when select-all is active) */
+export const selectedRowIds = derived(tableStore, ($t) => {
+  const s = new Set<number>();
+  if ($t.selection.allRows) {
+    for (const r of $t.rows) s.add(r.row_id);
+  } else {
+    for (const key of $t.selection.cells) {
+      const idx = key.indexOf(':');
+      s.add(Number(key.slice(0, idx)));
+    }
+  }
+  return s;
+});
+
+/** True when the engine's full result set is loaded (no more pages to fetch) */
+export const allLoaded = derived(tableStore, ($t) => $t.sqlResult !== null || $t.rows.length >= $t.totalRows);
+
+/** Unique cell values for a column (for filter popovers) */
+export function distinctValues(rows: RowData[], colIdx: number): (string | null)[] {
+  const seen = new Set<string | null>();
+  const values: (string | null)[] = [];
+  for (const r of rows) {
+    const v = r.values[colIdx];
+    const key = v === null || v === undefined ? null : String(v);
+    if (!seen.has(key)) {
+      seen.add(key);
+      values.push(key);
+    }
+  }
+  return values;
+}
+
 export const displayedRows = derived(tableStore, ($table) => {
   let rows = [...$table.rows];
 
+  // Column filters (AND across columns)
+  const filterCols = $table.columns.filter(c => $table.filters[c.name]?.size > 0);
+  if (filterCols.length > 0) {
+    rows = rows.filter(r => {
+      for (const c of filterCols) {
+        const idx = $table.columns.indexOf(c);
+        const v = r.values[idx];
+        const key = v === null || v === undefined ? null : String(v);
+        if (!$table.filters[c.name].has(key)) return false;
+      }
+      return true;
+    });
+  }
+
+  // Global / per-column search
   if ($table.search.query) {
     const q = $table.search.query.toLowerCase();
     if ($table.search.column) {

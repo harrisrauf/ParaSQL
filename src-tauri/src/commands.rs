@@ -155,10 +155,10 @@ pub fn sort_by(col_name: String, ascending: bool, state: State<AppState>) -> Res
 }
 
 #[tauri::command]
-pub fn generate_schema(state: State<AppState>) -> Result<String, String> {
+pub fn generate_schema(state: State<AppState>, dialect: Option<String>) -> Result<String, String> {
     let eng = state.engine.lock().map_err(|e| format!("Lock error: {}", e))?;
     let engine = eng.as_ref().ok_or_else(|| "No file open".to_string())?;
-    engine.generate_schema_sql()
+    engine.generate_schema_sql(&dialect.unwrap_or_else(|| "duckdb".to_string()))
 }
 
 #[tauri::command]
