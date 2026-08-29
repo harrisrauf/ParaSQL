@@ -150,7 +150,7 @@
           submenu: [
             { label: 'Sort Ascending', action: () => sortCurrent('asc') },
             { label: 'Sort Descending', action: () => sortCurrent('desc') },
-            { label: 'Clear Sort', action: () => tableStore.toggleSort($tableStore.sort.column), checked: false },
+            { label: 'Clear Sort', action: () => tableStore.clearSort(), checked: false },
           ],
         },
         { label: 'Clear Filters', action: () => tableStore.clearFilters(), disabled: !hasData },

@@ -30,6 +30,7 @@
   let rowHeight = $derived(density === 'compact' ? 26 : 36);
 
   let rowIndexMap = $derived(new Map($tableStore.rows.map((r, i) => [r.row_id, i])));
+  let displayedIndexMap = $derived(new Map(rows.map((r, i) => [r.row_id, i])));
 
   let effectiveWidths = $derived(
     Object.fromEntries(columns.map(c => [c.name, widths[c.name] ?? guessWidth(c, rows)]))
@@ -204,7 +205,7 @@
       return;
     }
 
-    const rowIdx = rows.findIndex(r => r.row_id === anchor.rowId);
+    const rowIdx = displayedIndexMap.get(anchor.rowId) ?? -1;
     const colIdx = anchor.colIdx;
     if (rowIdx < 0) return;
 
@@ -217,6 +218,14 @@
       case 'ArrowUp': nr = Math.max(0, rowIdx - 1); break;
       case 'ArrowRight': nc = Math.min(columns.length - 1, colIdx + 1); break;
       case 'ArrowLeft': nc = Math.max(0, colIdx - 1); break;
+      case 'Home':
+        if (e.ctrlKey || e.metaKey) { nr = 0; nc = 0; } else { nc = 0; }
+        break;
+      case 'End':
+        if (e.ctrlKey || e.metaKey) { nr = rows.length - 1; nc = columns.length - 1; } else { nc = columns.length - 1; }
+        break;
+      case 'PageDown': nr = Math.min(rows.length - 1, rowIdx + 30); break;
+      case 'PageUp': nr = Math.max(0, rowIdx - 30); break;
       case 'Enter':
       case 'F2':
         if (rows[rowIdx] && columns[colIdx]) {
@@ -324,53 +333,55 @@
       <div class="grid-body" style="height: {totalSize}px;">
         {#each virtualItems as item (item.key)}
           {@const row = rows[item.index]}
-          {@const isRowSelected = sel.allRows || selected.has(row.row_id)}
-          <div
-            class="grid-row"
-            class:selected={isRowSelected}
-            style="top: {item.start}px; height: {item.size}px;"
-            role="row"
-            data-row={row.row_id}
-          >
-            <!-- svelte-ignore a11y_click_events_have_key_events -->
+          {#if row}
+            {@const isRowSelected = sel.allRows || selected.has(row.row_id)}
             <div
-              class="row-id-cell"
-              style="width: {ROW_ID_W}px;"
-              role="button"
-              tabindex="-1"
-              onclick={(e) => handleRowIdClick(row, e)}
-              title={isRowSelected ? 'Selected' : ''}
-            >{(rowIndexMap.get(row.row_id) ?? 0) + 1}</div>
-            {#each columns as col, colIdx (col.name)}
-              {@const key = `${row.row_id}:${colIdx}`}
+              class="grid-row"
+              class:selected={isRowSelected}
+              style="top: {item.start}px; height: {item.size}px;"
+              role="row"
+              data-row={row.row_id}
+            >
               <!-- svelte-ignore a11y_click_events_have_key_events -->
               <div
-                class="cell"
-                class:selected={sel.cells.has(key)}
-                class:editing={editingCell?.rowId === row.row_id && editingCell?.colIdx === colIdx}
-                style="width: {effectiveWidths[col.name]}px;"
-                data-col={col.name}
-                onclick={(e) => handleCellClick(row, colIdx, e)}
-                ondblclick={() => handleEdit(row, colIdx)}
-                role="gridcell"
+                class="row-id-cell"
+                style="width: {ROW_ID_W}px;"
+                role="button"
                 tabindex="-1"
-              >
-                {#if editingCell?.rowId === row.row_id && editingCell?.colIdx === colIdx}
-                  <CellEditor
-                    value={row.values[colIdx] ?? null}
-                    dtype={col.dtype}
-                    onSave={(val) => handleSave(row.row_id, colIdx, val)}
-                    onCancel={() => (editingCell = null)}
-                  />
-                {:else}
-                  <span
-                    class="cell-value"
-                    title={isTruncated(row.values[colIdx]) ? String(row.values[colIdx]) : ''}
-                  >{formatCell(row.values[colIdx])}</span>
-                {/if}
-              </div>
-            {/each}
-          </div>
+                onclick={(e) => handleRowIdClick(row, e)}
+                title={isRowSelected ? 'Selected' : ''}
+              >{(rowIndexMap.get(row.row_id) ?? 0) + 1}</div>
+              {#each columns as col, colIdx (`${col.name}:${colIdx}`)}
+                {@const key = `${row.row_id}:${colIdx}`}
+                <!-- svelte-ignore a11y_click_events_have_key_events -->
+                <div
+                  class="cell"
+                  class:selected={sel.cells.has(key)}
+                  class:editing={editingCell?.rowId === row.row_id && editingCell?.colIdx === colIdx}
+                  style="width: {effectiveWidths[col.name]}px;"
+                  data-col={col.name}
+                  onclick={(e) => handleCellClick(row, colIdx, e)}
+                  ondblclick={() => handleEdit(row, colIdx)}
+                  role="gridcell"
+                  tabindex="-1"
+                >
+                  {#if editingCell?.rowId === row.row_id && editingCell?.colIdx === colIdx}
+                    <CellEditor
+                      value={row.values[colIdx] ?? null}
+                      dtype={col.dtype}
+                      onSave={(val) => handleSave(row.row_id, colIdx, val)}
+                      onCancel={() => (editingCell = null)}
+                    />
+                  {:else}
+                    <span
+                      class="cell-value"
+                      title={isTruncated(row.values[colIdx]) ? String(row.values[colIdx]) : ''}
+                    >{formatCell(row.values[colIdx])}</span>
+                  {/if}
+                </div>
+              {/each}
+            </div>
+          {/if}
         {/each}
         {#if !loaded}
           <div class="loading-row" style="top: {totalSize}px; height: {rowHeight}px;">

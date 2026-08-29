@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import { tableStore } from '../stores/table';
 
   let query = $state('');
@@ -14,9 +15,12 @@
   }
 
   function handleClear() {
+    clearTimeout(debounceTimer);
     query = '';
     tableStore.setSearch('', null);
   }
+
+  onDestroy(() => clearTimeout(debounceTimer));
 </script>
 
 <div class="search-bar">
@@ -38,8 +42,8 @@
     display: flex;
     align-items: center;
     gap: 4px;
-    background: white;
-    border: 1px solid #ddd;
+    background: var(--bg, white);
+    border: 1px solid var(--border-color, #ddd);
     border-radius: 4px;
     padding: 2px 8px;
     min-width: 200px;
@@ -54,7 +58,12 @@
     padding: 4px 0;
     font-size: 13px;
     flex: 1;
+    background: transparent;
+    color: var(--text-primary, #333);
     font-family: inherit;
+  }
+  .search-input::placeholder {
+    color: var(--text-secondary, #999);
   }
   .clear-btn {
     border: none;
@@ -62,9 +71,9 @@
     cursor: pointer;
     font-size: 12px;
     padding: 2px;
-    color: #999;
+    color: var(--text-secondary, #999);
   }
   .clear-btn:hover {
-    color: #333;
+    color: var(--text-primary, #333);
   }
 </style>
