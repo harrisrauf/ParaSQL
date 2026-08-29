@@ -1,0 +1,1003 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Parquet Viewer — Project Overview</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; max-width: 960px; margin: 0 auto; padding: 24px; color: #222; background: #fff; }
+  h1 { font-size: 28px; border-bottom: 2px solid #1a73e8; padding-bottom: 8px; }
+  h2 { font-size: 20px; margin-top: 28px; color: #1a73e8; }
+  h3 { font-size: 16px; margin-top: 20px; }
+  details { margin: 8px 0; border: 1px solid #e0e0e0; border-radius: 6px; overflow: hidden; }
+  details summary { padding: 12px 16px; cursor: pointer; font-weight: 600; background: #fafafa; border-bottom: 1px solid #e0e0e0; }
+  details[open] summary { border-bottom: 1px solid #e0e0e0; }
+  .details-content { padding: 12px 16px; }
+  pre { background: #f5f5f5; padding: 12px; border-radius: 4px; overflow-x: auto; font-size: 13px; border: 1px solid #e8e8e8; }
+  code { font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 14px; }
+  th, td { border: 1px solid #e0e0e0; padding: 8px 12px; text-align: left; }
+  th { background: #f5f5f5; font-weight: 600; }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 12px; font-weight: 600; margin-right: 4px; }
+  .tag-rust { background: #fed7aa; color: #9a3412; }
+  .tag-ts { background: #bfdbfe; color: #1e40af; }
+  .tag-svelte { background: #fecaca; color: #991b1b; }
+  .tag-all { background: #d1fae5; color: #065f46; }
+  .tag-test { background: #e9d5ff; color: #581c87; }
+  .tag-frontend { background: #fef3c7; color: #92400e; }
+  .tag-backend { background: #dbeafe; color: #1e3a5f; }
+  .summary-section { margin: 4px 0; }
+  .func-name { font-weight: 600; color: #1a56db; }
+  .file-path { font-family: monospace; font-size: 13px; color: #666; }
+  .badge { display: inline-block; background: #1a73e8; color: white; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>Parquet Viewer <span class="badge">v0.2.0</span></h1>
+<p>A native desktop Parquet file management application powered by DuckDB. Opens, views, edits, and saves Apache Parquet files with full SQL support, all Parquet types, virtual scrolling for performance, and a modern Svelte 5 UI. Built with Tauri v2 (Rust backend) + DuckDB (embedded database) + Svelte 5 (frontend).</p>
+
+<hr>
+
+<h2>Table of Contents</h2>
+<ol>
+  <li><a href="#philosophy">Project Idea &amp; Philosophy</a></li>
+  <li><a href="#stack">Technology Stack &amp; Dependencies</a></li>
+  <li><a href="#architecture">Architecture &amp; Data Flow (DuckDB-powered)</a></li>
+  <li><a href="#structure">Project File Tree</a></li>
+  <li><a href="#backend-types">Rust Backend — Core Types</a></li>
+  <li><a href="#backend-duckdb">Rust Backend — DuckDB Engine</a></li>
+  <li><a href="#backend-commands">Rust Backend — Tauri Commands (18)</a></li>
+  <li><a href="#frontend-types">Frontend — Types &amp; IPC Wrappers</a></li>
+  <li><a href="#frontend-store">Frontend — Svelte Store</a></li>
+  <li><a href="#frontend-components">Frontend — Components (12)</a></li>
+  <li><a href="#sql-editor">SQL Query Editor (CodeMirror 6)</a></li>
+  <li><a href="#dark-mode">Dark Mode &amp; Theming</a></li>
+  <li><a href="#build">Build, Run &amp; Verify</a></li>
+  <li><a href="#future">Future Scaling &amp; Upgrades</a></li>
+</ol>
+
+<hr>
+
+<!-- ============ 1. PHILOSOPHY ============ -->
+<h2 id="philosophy">1. Project Idea &amp; Philosophy</h2>
+
+<details>
+<summary>What this project is and why it exists</summary>
+<div class="details-content">
+
+<h3>Purpose</h3>
+<p>Apache Parquet is the dominant columnar storage format in the data engineering ecosystem. This project provides a native desktop application for interacting with Parquet files — not just viewing data, but querying, editing, and managing it with the full power of SQL. Powered by DuckDB (the same embedded OLAP database used by DBeaver, dbt, and modern data tools), it handles all Parquet types including nested structures (List, Map, Struct), and provides a CodeMirror-powered SQL editor for ad-hoc queries.</p>
+
+<h3>Core Principles</h3>
+<ul>
+  <li><strong>DuckDB as the data engine</strong> — DuckDB is an embedded OLAP database that natively reads Parquet files, executes full SQL, and outputs Arrow record batches. It provides buttery-smooth performance for queries, filtering, sorting, and pagination across datasets of any size.</li>
+  <li><strong>Full Parquet type support</strong> — DuckDB handles all Parquet types natively: INT32/64, FLOAT/DOUBLE, BOOLEAN, STRING, DATE, TIMESTAMP, DECIMAL, UUID, BINARY, LIST, MAP, and STRUCT. The <code>arrow_array_to_json</code> function converts Arrow batches to JSON for the frontend, with recursive handling for nested types.</li>
+  <li><strong>SQL-first approach</strong> — Users can write SQL queries directly against loaded Parquet files via a built-in CodeMirror 6 editor with syntax highlighting and autocomplete. This makes the app a lightweight Parquet-native database client.</li>
+  <li><strong>Virtual scrolling</strong> — The DataTable uses TanStack Svelte Virtual to render only visible rows (~30 at a time), providing buttery-smooth scrolling regardless of dataset size.</li>
+  <li><strong>Incremental patches</strong> — Mutations return only changed rows, not full snapshots. The frontend patches its store incrementally.</li>
+  <li><strong>JSON for IPC</strong> — All IPC between Rust and the frontend uses JSON serialization for simplicity.</li>
+  <li><strong>Dark mode</strong> — CSS custom properties with localStorage persistence. Toggle via toolbar button.</li>
+</ul>
+
+<h3>Design Documents</h3>
+<p>
+  <code>docs/superpowers/specs/2026-05-28-parquet-viewer-design.md</code> — Full design specification.<br>
+  <code>docs/superpowers/plans/2026-05-28-parquet-viewer-plan.md</code> — 11-task implementation plan.
+</p>
+
+</div>
+</details>
+
+<!-- ============ 2. STACK ============ -->
+<h2 id="stack">2. Technology Stack &amp; Dependencies</h2>
+
+<details>
+<summary>Languages, frameworks, crates, and packages</summary>
+<div class="details-content">
+
+<table>
+  <tr><th>Layer</th><th>Technology</th><th>Version</th><th>Purpose</th></tr>
+  <tr><td>Shell</td><td>Tauri v2</td><td>2.11</td><td>Native desktop window, system dialogs, IPC bridge</td></tr>
+  <tr><td>Backend language</td><td>Rust</td><td>edition 2021</td><td>Data engine, Parquet I/O, SQL execution</td></tr>
+  <tr><td>Backend: DuckDB</td><td><code>duckdb</code> crate</td><td>1.10503.1</td><td>Embedded OLAP database — reads Parquet, executes SQL, outputs Arrow</td></tr>
+  <tr><td>Backend: Arrow</td><td><code>arrow</code> crate</td><td>58</td><td>In-memory columnar data (<code>RecordBatch</code>, <code>Array</code>, <code>Schema</code>) — aligned with DuckDB</td></tr>
+  <tr><td>Backend: Chrono</td><td><code>chrono</code> crate</td><td>0.4</td><td>Date/time formatting for Timestamp/Date types</td></tr>
+  <tr><td>Backend: Serialization</td><td><code>serde</code> + <code>serde_json</code></td><td>1</td><td>JSON IPC between Rust and frontend</td></tr>
+  <tr><td>Backend: Dialogs</td><td><code>tauri-plugin-dialog</code></td><td>2</td><td>Native file open/save dialogs</td></tr>
+  <tr><td>Frontend framework</td><td>Svelte</td><td>5</td><td>Reactive UI components</td></tr>
+  <tr><td>Frontend language</td><td>TypeScript</td><td>5.6</td><td>Type-safe frontend code</td></tr>
+  <tr><td>Bundler</td><td>Vite</td><td>6</td><td>Dev server + production build</td></tr>
+  <tr><td>Frontend: Tauri API</td><td><code>@tauri-apps/api</code></td><td>2.11</td><td>IPC invoke, window events</td></tr>
+  <tr><td>Frontend: Dialogs</td><td><code>@tauri-apps/plugin-dialog</code></td><td>2.7</td><td>Open/save dialogs from frontend</td></tr>
+  <tr><td>Frontend: Virtual Scroll</td><td><code>@tanstack/svelte-virtual</code></td><td>3.13</td><td>Virtual scrolling for buttery-smooth table performance</td></tr>
+  <tr><td>Frontend: SQL Editor</td><td><code>codemirror</code> + <code>@codemirror/lang-sql</code></td><td>6.x</td><td>SQL syntax highlighting, autocomplete, dark theme</td></tr>
+  <tr><td>Testing</td><td><code>tempfile</code></td><td>3</td><td>Temporary files for tests</td></tr>
+</table>
+
+</div>
+</details>
+
+<!-- ============ 3. ARCHITECTURE ============ -->
+<h2 id="architecture">3. Architecture &amp; Data Flow</h2>
+
+<details>
+<summary>High-level architecture diagram and IPC flow</summary>
+<div class="details-content">
+
+<h3>System Diagram (DuckDB-powered v0.2)</h3>
+<pre>
+┌─────────────────────────────────────────────────────────┐
+│ Tauri Shell (Rust)                                       │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │ AppState { engine: Mutex&lt;Option&lt;DuckDbEngine&gt;&gt; }   │  │
+│  │                                                    │  │
+│  │  ┌──────────────────────────────────────────┐     │  │
+│  │  │ DuckDbEngine                              │     │  │
+│  │  │  ├─ Connection (in-memory DuckDB)         │     │  │
+│  │  │  ├─ table_name: "working"                 │     │  │
+│  │  │  ├─ file_metadata: Option&lt;FileMetadata&gt;  │     │  │
+│  │  │  │                                         │     │  │
+│  │  │  │  DuckDB loads Parquet via:              │     │  │
+│  │  │  │  CREATE VIEW raw_parquet AS SELECT *    │     │  │
+│  │  │  │    FROM read_parquet('file.parquet')    │     │  │
+│  │  │  │  CREATE TABLE working AS                │     │  │
+│  │  │  │    SELECT row_number() OVER() AS _row_id│     │  │
+│  │  │  │    , t.* FROM raw_parquet t             │     │  │
+│  │  │  └──────────────────────────────────────────┘     │  │
+│  │  └────────────────────────────────────────────────────┘  │
+│  │                                                         │
+│  │  ┌──────────────────────────────────────────┐          │
+│  │  │ 18 #[tauri::command] functions             │          │
+│  │  │ open_file, save_file, save_file_as        │          │
+│  │  │ get_file_info, get_all_rows, get_page      │          │
+│  │  │ get_columns, edit_cell, delete_rows         │          │
+│  │  │ insert_row, add_column, drop_column          │          │
+│  │  │ rename_column, execute_sql, sort_by          │          │
+│  │  │ generate_schema, export_json, export_csv     │          │
+│  │  └──────────────────┬──────────────────────────┘          │
+│  └─────────────────────┼──────────────────────────────────┘
+│                        │ JSON IPC
+├────────────────────────┼─────────────────────────────────┤
+│ Svelte Frontend        │                                  │
+│  ┌─────────────────────┴────────────────────────────┐    │
+│  │ commands.ts — typed invoke() wrappers             │    │
+│  │ stores/table.ts — writable + derived store        │    │
+│  │ stores/settings.ts — dark mode, preferences       │    │
+│  │ Components:                                       │    │
+│  │   App, Toolbar, DataTable (virtual scrolling)    │    │
+│  │   RightSidebar (Schema/Query/Metadata tabs)      │    │
+│  │   SqlEditor (CodeMirror 6), SearchBar            │    │
+│  │   TableHeader, TableRow, CellEditor, StatusBar   │    │
+│  └──────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────┘
+</pre>
+
+<h3>IPC Data Flow</h3>
+<ol>
+  <li><strong>Open File</strong>: Frontend calls Tauri dialog → sends path to <code>open_file</code> → DuckDB loads Parquet via <code>read_parquet()</code> into in-memory table with <code>_row_id</code> → returns <code>MetadataJson</code>. Frontend calls <code>get_all_rows</code> to fetch data.</li>
+  <li><strong>SQL Query</strong>: User types SQL in CodeMirror editor → sends to <code>execute_sql</code> → DuckDB executes query → Arrow RecordBatch converted to JSON → returns <code>QueryResult</code> with columns and rows.</li>
+  <li><strong>Mutation</strong>: Frontend sends <code>edit_cell(row_id, col_idx, value)</code> → DuckDB executes <code>UPDATE working SET col = value WHERE _row_id = id</code> → returns updated row as <code>QueryResult</code>.</li>
+  <li><strong>Save</strong>: Frontend sends <code>save_file()</code> → DuckDB executes <code>COPY working TO 'file.json'</code> (or CSV). For Parquet save, uses DuckDB's Parquet export.</li>
+</ol>
+
+<h3>Row Identity Model</h3>
+<ul>
+  <li>DuckDB creates <code>_row_id</code> as <code>row_number() OVER ()</code> when loading the table — stable auto-incrementing u64.</li>
+  <li>All mutations reference rows by <code>_row_id</code>, not by view index.</li>
+  <li>Sorting and filtering use SQL <code>ORDER BY</code> / <code>WHERE</code> clauses — the <code>_row_id</code> remains stable.</li>
+</ul>
+
+<h3>Unsaved-Changes Guard</h3>
+<p><code>App.svelte</code> uses <code>getCurrentWindow().onCloseRequested()</code> to intercept window close. If the store's <code>modified</code> flag is true, it shows a native confirm dialog ("You have unsaved changes. Close anyway?"). The close event is prevented if the user cancels.</p>
+
+</div>
+</details>
+
+<!-- ============ 4. FILE TREE ============ -->
+<h2 id="structure">4. Project File Tree</h2>
+
+<details>
+<summary>All 30 source files with annotations</summary>
+<div class="details-content">
+
+<pre>
+parquet-viewer/
+├── <strong>package.json</strong>                          <span class="tag tag-all">config</span>        NPM scripts, dependencies (Svelte 5, Vite 6, DuckDB, CodeMirror)
+├── <strong>vite.config.ts</strong>                        <span class="tag tag-all">config</span>        Vite configuration (Svelte plugin, Tauri dev server)
+├── <strong>tsconfig.json</strong>                        <span class="tag tag-all">config</span>        TypeScript configuration
+├── <strong>index.html</strong>                           <span class="tag tag-frontend">entry</span>        HTML entry point for Vite
+│
+├── <strong>src/</strong>                                  <span class="tag tag-frontend">frontend</span>     Svelte + TypeScript source
+│   ├── <strong>main.ts</strong>                            <span class="tag tag-ts">entry</span>        App bootstrap — mount(App, #app)
+│   ├── <strong>app.css</strong>                            <span class="tag tag-frontend">styles</span>      Global styles with CSS variables (light/dark mode), scrollbar customization
+│   ├── <strong>App.svelte</strong>                         <span class="tag tag-svelte">component</span>   Root layout: Toolbar + DataTable + RightSidebar + StatusBar
+│   ├── <strong>vite-env.d.ts</strong>                      <span class="tag tag-ts">types</span>       Vite client type declarations
+│   │
+│   └── <strong>lib/</strong>
+│       ├── <strong>types.ts</strong>                         <span class="tag tag-ts">types</span>       ColumnInfo, RowData, QueryResult, MetadataJson, SortConfig, SearchConfig
+│       ├── <strong>commands.ts</strong>                      <span class="tag tag-ts">IPC</span>        18 typed invoke() wrappers matching Rust #[tauri::command]
+│       │
+│       ├── <strong>stores/</strong>
+│       │   ├── <strong>table.ts</strong>                      <span class="tag tag-ts">store</span>       TableState writable + displayedRows derived (search + sort)
+│       │   └── <strong>settings.ts</strong>                    <span class="tag tag-ts">store</span>       Dark mode, page size, date/float format preferences (localStorage)
+│       │
+│       └── <strong>components/</strong>
+│           ├── <strong>Toolbar.svelte</strong>                <span class="tag tag-svelte">component</span>   Open/Save/SaveAs, + Row, Export JSON/CSV, Dark mode toggle, Search
+│           ├── <strong>SearchBar.svelte</strong>              <span class="tag tag-svelte">component</span>   Debounced search input (200ms)
+│           ├── <strong>DataTable.svelte</strong>              <span class="tag tag-svelte">component</span>   Virtual scrolling table (TanStack Virtual), cell overflow tooltips
+│           ├── <strong>TableHeader.svelte</strong>            <span class="tag tag-svelte">component</span>   Column headers with sort indicators (▲/▼)
+│           ├── <strong>CellEditor.svelte</strong>             <span class="tag tag-svelte">component</span>   Inline editor: text/number/select for booleans
+│           ├── <strong>RightSidebar.svelte</strong>           <span class="tag tag-svelte">component</span>   Right panel with Schema/Query/Metadata tabs
+│           ├── <strong>SqlEditor.svelte</strong>              <span class="tag tag-svelte">component</span>   CodeMirror 6 SQL editor with autocomplete, dark theme, query history
+│           └── <strong>StatusBar.svelte</strong>              <span class="tag tag-svelte">component</span>   Row count (N of M), sort info, modified indicator, filename
+│
+├── <strong>src-tauri/</strong>                             <span class="tag tag-backend">backend</span>     Rust source
+│   ├── <strong>Cargo.toml</strong>                         <span class="tag tag-all">config</span>      Rust dependencies (duckdb 1.10503, arrow 58, tauri 2, chrono)
+│   ├── <strong>tauri.conf.json</strong>                    <span class="tag tag-all">config</span>      Tauri window (1200x800), build commands, security CSP
+│   ├── <strong>build.rs</strong>                           <span class="tag tag-rust">build</span>       Tauri build script
+│   │
+│   └── <strong>src/</strong>
+│       ├── <strong>main.rs</strong>                          <span class="tag tag-rust">entry</span>       Desktop entry point — calls lib::run()
+│       ├── <strong>lib.rs</strong>                           <span class="tag tag-rust">setup</span>      Tauri builder: plugins, AppState, 18 command registrations
+│       ├── <strong>commands.rs</strong>                      <span class="tag tag-rust">IPC</span>        18 #[tauri::command] handlers wrapping DuckDbEngine
+│       │
+│       └── <strong>engine/</strong>
+│           ├── <strong>mod.rs</strong>                        <span class="tag tag-rust">module</span>     Exports duckdb, types + #[cfg(test)] test modules
+│           ├── <strong>duckdb.rs</strong>                      <span class="tag tag-rust">core</span>       DuckDbEngine: Parquet I/O, SQL execution, mutations, exports (350+ lines)
+│           ├── <strong>types.rs</strong>                       <span class="tag tag-rust">types</span>      ColumnInfo, RowData, QueryResult, MetadataJson, FileMetadata, CompressionPreset
+│           └── <strong>types_test.rs</strong>                  <span class="tag tag-test">tests</span>      3 type tests
+│
+└── <strong>docs/superpowers/</strong>
+    ├── <strong>specs/2026-05-28-parquet-viewer-design.md</strong>   Design specification
+    └── <strong>plans/2026-05-28-parquet-viewer-plan.md</strong>     Implementation plan (11 tasks)
+</pre>
+
+</div>
+</details>
+
+<!-- ============ 5. BACKEND TYPES ============ -->
+<h2 id="backend-types">5. Rust Backend — Core Types</h2>
+
+<details>
+<summary>types.rs — All data structures, OpEntry enum, and OpLog</summary>
+<div class="details-content">
+
+<p class="file-path">src-tauri/src/engine/types.rs</p>
+
+<h3>Data Structures</h3>
+
+<table>
+  <tr><th>Type</th><th>Fields</th><th>Serde?</th><th>Purpose</th></tr>
+  <tr>
+    <td><code>ColumnInfo</code></td>
+    <td><code>name: String</code>, <code>dtype: String</code>, <code>nullable: bool</code></td>
+    <td>Serialize + Deserialize</td>
+    <td>Schema metadata sent to frontend</td>
+  </tr>
+  <tr>
+    <td><code>RowData</code></td>
+    <td><code>row_id: u64</code>, <code>values: Vec&lt;JsonValue&gt;</code></td>
+    <td>Serialize + Deserialize</td>
+    <td>Single row payload to/from frontend</td>
+  </tr>
+  <tr>
+    <td><code>MutationResult</code></td>
+    <td><code>affected: Vec&lt;RowData&gt;</code>, <code>deleted_ids: Vec&lt;u64&gt;</code>, <code>schema_changed: bool</code>, <code>new_schema: Option&lt;Vec&lt;ColumnInfo&gt;&gt;</code></td>
+    <td>Serialize + Deserialize</td>
+    <td>Incremental mutation response (not full snapshot)</td>
+  </tr>
+  <tr>
+    <td><code>MetadataJson</code></td>
+    <td><code>columns: Vec&lt;ColumnInfo&gt;</code>, <code>total_rows: usize</code>, <code>file_path: Option&lt;String&gt;</code></td>
+    <td>Serialize + Deserialize</td>
+    <td>Initial file metadata response</td>
+  </tr>
+  <tr>
+    <td><code>FileMetadata</code></td>
+    <td><code>path: Option&lt;PathBuf&gt;</code>, <code>compression: Compression</code>, <code>row_group_size: usize</code>, <code>data_page_size: Option&lt;usize&gt;</code></td>
+    <td>No (internal)</td>
+    <td>Original Parquet file settings preserved for save</td>
+  </tr>
+</table>
+
+<h3>OpEntry Enum (6 variants)</h3>
+
+<table>
+  <tr><th>Variant</th><th>Fields</th><th>Undo Strategy</th></tr>
+  <tr>
+    <td><code>EditCell</code></td>
+    <td><code>row_id, col_idx, old: JsonValue, new: JsonValue</code></td>
+    <td>Restore <code>old</code> value</td>
+  </tr>
+  <tr>
+    <td><code>DeleteRows</code></td>
+    <td><code>rows: Vec&lt;(u64, Vec&lt;JsonValue&gt;)&gt;</code></td>
+    <td>Re-insert rows with original IDs and values</td>
+  </tr>
+  <tr>
+    <td><code>InsertRows</code></td>
+    <td><code>row_ids: Vec&lt;u64&gt;, index: usize</code></td>
+    <td>Delete rows by ID</td>
+  </tr>
+  <tr>
+    <td><code>AddColumn</code></td>
+    <td><code>name: String, dtype: String</code></td>
+    <td>Drop column by name</td>
+  </tr>
+  <tr>
+    <td><code>DropColumn</code></td>
+    <td><code>name: String, column_data: Vec&lt;Option&lt;JsonValue&gt;&gt;</code></td>
+    <td>Re-add column and restore data cell-by-cell</td>
+  </tr>
+  <tr>
+    <td><code>RenameColumn</code></td>
+    <td><code>old_name: String, new_name: String</code></td>
+    <td>Rename back: rename(new_name, old_name)</td>
+  </tr>
+</table>
+
+<h3>OpLog Implementation</h3>
+<pre>
+struct OpLog {
+    entries: Vec&lt;OpEntry&gt;,     // operation history
+    position: usize,            // current position (pointing to next to undo)
+    max_entries: usize,         // default 500
+}
+</pre>
+
+<ul>
+  <li><code>push(entry)</code> — Truncates redo entries (<code>entries.truncate(position)</code>), pushes new entry, evicts oldest if over <code>max_entries</code>, sets <code>position</code> to end.</li>
+  <li><code>undo() → Option&lt;&OpEntry&gt;</code> — Decrements position, returns entry at new position.</li>
+  <li><code>redo() → Option&lt;&OpEntry&gt;</code> — Returns entry at current position, increments position.</li>
+  <li><code>can_undo() / can_redo()</code> — Check position bounds (used by frontend for button states, wired but not currently called).</li>
+</ul>
+
+</div>
+</details>
+
+<!-- ============ 6. BACKEND PARQUET IO ============ -->
+<h2 id="backend-io">6. Rust Backend — Parquet I/O</h2>
+
+<details>
+<summary>parquet_io.rs — read_parquet and write_parquet</summary>
+<div class="details-content">
+
+<p class="file-path">src-tauri/src/engine/parquet_io.rs (96 lines)</p>
+
+<h3><code>read_parquet(path: &amp;Path) → Result&lt;(RecordBatch, FileMetadata), String&gt;</code></h3>
+<ol>
+  <li>Opens file with <code>File::open</code>.</li>
+  <li>Creates <code>ParquetRecordBatchReaderBuilder</code> from file handle.</li>
+  <li>Extracts <code>file_metadata</code> from builder metadata (used later for original file info).</li>
+  <li>Sets compression to <code>Compression::SNAPPY</code> (default — original <code>writer_props()</code> API removed in Parquet 54).</li>
+  <li>Gets row group size from <code>metadata.num_rows()</code>.</li>
+  <li>Builds reader and iterates over all batches.</li>
+  <li><strong>Multi-batch concatenation</strong>: If the file has multiple batches (common in large files), concatenates column-by-column using <code>arrow::compute::concat</code>.</li>
+  <li>Returns <code>(combined_batch, file_metadata)</code> or error for empty files.</li>
+</ol>
+
+<h3><code>write_parquet(path, batch, file_meta) → Result&lt;(), String&gt;</code></h3>
+<ol>
+  <li>Builds <code>WriterProperties</code> from file metadata (compression codec, data page size).</li>
+  <li>Creates <code>ArrowWriter</code> with the schema and properties.</li>
+  <li>Writes the single batch.</li>
+  <li>Closes the writer (flushes footer).</li>
+</ol>
+
+<p><strong>Key detail</strong>: On "Save As" (no file_meta), uses <code>FileMetadata::default()</code> which sets Snappy compression, row group size 1024, data page size 1MB.</p>
+
+</div>
+</details>
+
+<!-- ============ 7. BACKEND ENGINE ============ -->
+<h2 id="backend-engine">7. Rust Backend — Data Engine</h2>
+
+<details>
+<summary>engine.rs — Full mutation API, undo/redo, and private helpers</summary>
+<div class="details-content">
+
+<p class="file-path">src-tauri/src/engine/engine.rs (698 lines)</p>
+
+<h3>Engine Struct</h3>
+<pre>
+pub struct Engine {
+    batch: RecordBatch,           // Authoritative data store
+    schema: SchemaRef,            // Cached schema (Arc&lt;Schema&gt;)
+    row_ids: Vec&lt;u64&gt;,            // Stable row IDs parallel to batch rows
+    next_row_id: u64,             // Next auto-increment ID
+    file_metadata: Option&lt;FileMetadata&gt;,  // Original file settings
+    modified: bool,               // Dirty flag for save prompting
+    oplog: OpLog,                 // Bounded undo/redo (500 entries)
+}
+</pre>
+
+<h3>Construction &amp; Accessors (8 functions)</h3>
+
+<table>
+  <tr><th>Function</th><th>Signature</th><th>Behavior</th></tr>
+  <tr><td><code>new</code></td><td><code>(batch) → Engine</code></td><td>Creates engine with sequential row IDs (0..num_rows), modified=true</td></tr>
+  <tr><td><code>from_parquet</code></td><td><code>(batch, file_meta) → Engine</code></td><td>Like new but stores file metadata and sets modified=false</td></tr>
+  <tr><td><code>num_rows/num_cols</code></td><td><code>() → usize</code></td><td>Delegates to RecordBatch</td></tr>
+  <tr><td><code>row_ids</code></td><td><code>() → &amp;[u64]</code></td><td>Returns slice of stable IDs</td></tr>
+  <tr><td><code>is_modified</code></td><td><code>() → bool</code></td><td>Dirty flag</td></tr>
+  <tr><td><code>file_path</code></td><td><code>() → Option&lt;&amp;Path&gt;</code></td><td>Path from file metadata</td></tr>
+  <tr><td><code>column_info</code></td><td><code>() → Vec&lt;ColumnInfo&gt;</code></td><td>Iterates schema fields, maps to ColumnInfo</td></tr>
+  <tr><td><code>get_all_rows</code></td><td><code>() → Vec&lt;RowData&gt;</code></td><td>Converts entire batch to JSON-serializable form</td></tr>
+</table>
+
+<h3>Mutation API (6 functions)</h3>
+
+<table>
+  <tr><th>Function</th><th>Lines</th><th>Logic</th></tr>
+  <tr>
+    <td><code>edit_cell(row_id, col_idx, value)</code></td>
+    <td>299-338</td>
+    <td>
+      📍 Find row index by ID → get old value → push OpEntry with old+new → build new column array via <code>replace_value_in_array</code> (rebuilds entire column with one cell changed) → reconstruct RecordBatch → return MutationResult with affected row.
+    </td>
+  </tr>
+  <tr>
+    <td><code>delete_rows(row_ids_input)</code></td>
+    <td>340-384</td>
+    <td>
+      📍 Map IDs to indices → sort+dedup → reverse (for safe removal) → store deleted data for OpLog → filter remaining rows by building new arrays with only kept indices → return deleted_ids in result.
+    </td>
+  </tr>
+  <tr>
+    <td><code>insert_row(index)</code></td>
+    <td>386-448</td>
+    <td>
+      📍 Allocate new ID → push OpEntry → build a 1-row batch (nulls for nullable cols, defaults for non-nullable) → slice batch around insertion point → concat before + new + after → insert row_id into vector → return affected row.
+      <br><em>Arrow 54 fix</em>: Uses <code>append_default</code> for non-nullable columns (empty string for Utf8, 0 for numbers) instead of null to avoid schema validation errors.
+    </td>
+  </tr>
+  <tr>
+    <td><code>add_column(name, dtype)</code></td>
+    <td>450-482</td>
+    <td>
+      📍 Parse dtype string → collect schema fields as <code>Vec&lt;Field&gt;</code> → push new field with nullable=true → create Schema → make null array for new column → append to columns → push OpEntry → return schema_changed.
+      <br><em>Arrow 54 fix</em>: Uses <code>Vec&lt;Field&gt;</code> instead of <code>Fields</code> (which lacks push method).
+    </td>
+  </tr>
+  <tr>
+    <td><code>drop_column(name)</code></td>
+    <td>484-521</td>
+    <td>
+      📍 Find column index → save all column data for undo → collect fields as Vec → remove field → remove column array → rebuild batch → return schema_changed.
+    </td>
+  </tr>
+  <tr>
+    <td><code>rename_column(old_name, new_name)</code></td>
+    <td>523-547</td>
+    <td>
+      📍 Find column index → push OpEntry → collect fields as Vec → clone old field → replace with new field (same dtype + nullable) → rebuild batch schema → return schema_changed.
+    </td>
+  </tr>
+</table>
+
+<h3>Undo/Redo (4 functions)</h3>
+
+<table>
+  <tr><th>Function</th><th>Behavior</th></tr>
+  <tr>
+    <td><code>undo()</code></td>
+    <td>Pop from OpLog (<code>oplog.undo()</code>) → clone entry → call <code>apply_op_reverse(entry)</code>.</td>
+  </tr>
+  <tr>
+    <td><code>redo()</code></td>
+    <td>Restore from OpLog (<code>oplog.redo()</code>) → clone entry → call <code>apply_op_forward(entry)</code>.</td>
+  </tr>
+  <tr>
+    <td><code>apply_op_reverse(entry)</code></td>
+    <td>Match on entry variant → perform inverse operation: EditCell → <code>edit_cell_raw(old)</code>; DeleteRows → <code>insert_row_with_id</code> for each; InsertRows → <code>delete_rows</code>; AddColumn → <code>drop_column</code>; DropColumn → <code>add_column</code> then restore data cell-by-cell; RenameColumn → swap names back.</td>
+  </tr>
+  <tr>
+    <td><code>apply_op_forward(entry)</code></td>
+    <td>Match on entry variant → perform forward operation: EditCell → <code>edit_cell_raw(new)</code>; DeleteRows → <code>delete_rows</code>; InsertRows → <code>insert_row</code>; AddColumn → <code>add_column</code>; DropColumn → <code>drop_column</code>; RenameColumn → rename.</td>
+  </tr>
+</table>
+
+<h3>Private Helpers (10 functions)</h3>
+
+<table>
+  <tr><th>Function</th><th>Purpose</th></tr>
+  <tr><td><code>row_to_json(batch, row_idx) → Vec&lt;JsonValue&gt;</code></td><td>Converts one row of a RecordBatch to JSON values, one per column.</td></tr>
+  <tr><td><code>arrow_array_to_json(array, row_idx) → JsonValue</code></td><td>Downcasts Array to concrete type (String/LargeString/Int64/Int32/Float64/Float32/Boolean) and extracts a single value as JsonValue. Falls back to Null for unknown types.</td></tr>
+  <tr><td><code>json_to_arrow_value(value, dtype) → Result&lt;JsonValue&gt;</code></td><td>Validates/coerces a JSON value to match the expected Arrow dtype (boolean string coercion, type checking for numbers).</td></tr>
+  <tr><td><code>make_array_builder(dtype, capacity) → Box&lt;dyn ArrayBuilder&gt;</code></td><td>Creates the correct typed builder for a given DataType.</td></tr>
+  <tr><td><code>append_default(builder, dtype)</code></td><td>Appends a zero/default value ("" for strings, 0 for numbers, false for bools) — used for non-nullable columns in insert_row.</td></tr>
+  <tr><td><code>append_null(builder)</code></td><td>Downcasts builder and appends null.</td></tr>
+  <tr><td><code>append_array_value(builder, array, idx)</code></td><td>Copies one value from an existing array to a builder (used when reconstructing columns during mutations).</td></tr>
+  <tr><td><code>append_json_value(builder, value)</code></td><td>Converts a JSON value to an Arrow value and appends to builder. <em>Note</em>: Uses <code>s.clone(); append_value(&amp;s)</code> to avoid temporary lifetime issues with <code>other.to_string()</code>.</td></tr>
+  <tr><td><code>make_null_array(dtype, len) → ArrayRef</code></td><td>Creates an array of all nulls for a given type.</td></tr>
+  <tr><td><code>replace_value_in_array(array, row_idx, new_value, dtype) → ArrayRef</code></td><td>Rebuilds an array with one cell changed — iterates all rows, copies values or inserts replacement.</td></tr>
+</table>
+
+<h3>Arrow 54 Compatibility Notes</h3>
+<ul>
+  <li><strong>Fields API</strong>: Schema's <code>fields()</code> returns <code>&amp;Fields</code>, which wraps <code>Vec&lt;Arc&lt;Field&gt;&gt;</code> with no <code>push</code>/<code>remove</code>. Solution: iterate with <code>.map(|f| f.as_ref().clone())</code> to get <code>Vec&lt;Field&gt;</code>, modify freely, then <code>Schema::new(fields)</code>.</li>
+  <li><strong>Slice lifetimes</strong>: <code>RecordBatch::slice()</code> returns a batch that borrows from parent. Column references from sliced batches must be cloned into <code>Arc&lt;dyn Array&gt;</code> before passing to <code>concat()</code>.</li>
+  <li><strong>Non-nullable insert</strong>: <code>RecordBatch::try_new</code> validates non-null constraints. Inserting a row with nulls into non-nullable columns fails. Solution: <code>append_default</code> for non-nullable fields.</li>
+</ul>
+
+</div>
+</details>
+
+<!-- ============ 8. BACKEND COMMANDS ============ -->
+<h2 id="backend-commands">8. Rust Backend — Tauri Commands</h2>
+
+<details>
+<summary>commands.rs + lib.rs — Tauri IPC bridge and app setup</summary>
+<div class="details-content">
+
+<h3>AppState</h3>
+<pre>
+pub struct AppState {
+    pub engine: Mutex&lt;Option&lt;Engine&gt;&gt;,
+}
+</pre>
+<p>The engine is wrapped in <code>Mutex&lt;Option&lt;Engine&gt;&gt;</code> — it starts as <code>None</code> and is set when a file is opened. Every command locks the mutex, accesses the engine, and returns the result.</p>
+
+<h3>lib.rs — Tauri Builder</h3>
+<pre>
+tauri::Builder::default()
+    .plugin(tauri_plugin_dialog::init())     // Native file dialogs
+    .manage(AppState { engine: Mutex::new(None) })
+    .invoke_handler(tauri::generate_handler![
+        commands::open_file,       // Open parquet, return MetadataJson
+        commands::save_file,       // Save to original path
+        commands::save_file_as,    // Save to new path
+        commands::get_file_info,   // Return rows/cols/modified/path/columns as JSON
+        commands::get_all_rows,    // Return all RowData
+        commands::edit_cell,       // Edit cell at (row_id, col_idx, value) → MutationResult
+        commands::delete_rows,     // Delete rows by IDs → MutationResult
+        commands::insert_row,      // Insert row at index → MutationResult
+        commands::add_column,      // Add column (name, dtype) → MutationResult
+        commands::drop_column,     // Drop column by name → MutationResult
+        commands::rename_column,   // Rename column → MutationResult
+        commands::undo,            // Undo → MutationResult
+        commands::redo,            // Redo → MutationResult
+    ])
+    .run(tauri::generate_context!())
+</pre>
+
+<h3>Command Details</h3>
+
+<table>
+  <tr><th>Command</th><th>Args</th><th>Returns</th><th>Logic</th></tr>
+  <tr><td><code>open_file</code></td><td><code>path: String</code></td><td><code>MetadataJson</code></td><td>Read parquet → create Engine::from_parquet → store in Mutex → return metadata</td></tr>
+  <tr><td><code>save_file</code></td><td>—</td><td><code>()</code></td><td>Lock → get path from engine → clone batch → write_parquet</td></tr>
+  <tr><td><code>save_file_as</code></td><td><code>path: String</code></td><td><code>()</code></td><td>Lock → clone batch → write_parquet with None metadata</td></tr>
+  <tr><td><code>get_file_info</code></td><td>—</td><td><code>JSON</code></td><td>Lock → return rows, cols, modified, path, columns as json object</td></tr>
+  <tr><td><code>get_all_rows</code></td><td>—</td><td><code>Vec&lt;RowData&gt;</code></td><td>Lock → engine.get_all_rows()</td></tr>
+  <tr><td><code>edit_cell</code></td><td><code>row_id, col_idx, value</code></td><td><code>MutationResult</code></td><td>Lock → engine.edit_cell()</td></tr>
+  <tr><td><code>delete_rows</code></td><td><code>row_ids</code></td><td><code>MutationResult</code></td><td>Lock → engine.delete_rows()</td></tr>
+  <tr><td><code>insert_row</code></td><td><code>index</code></td><td><code>MutationResult</code></td><td>Lock → engine.insert_row()</td></tr>
+  <tr><td><code>add_column</code></td><td><code>name, dtype</code></td><td><code>MutationResult</code></td><td>Lock → engine.add_column()</td></tr>
+  <tr><td><code>drop_column</code></td><td><code>name</code></td><td><code>MutationResult</code></td><td>Lock → engine.drop_column()</td></tr>
+  <tr><td><code>rename_column</code></td><td><code>old_name, new_name</code></td><td><code>MutationResult</code></td><td>Lock → engine.rename_column()</td></tr>
+  <tr><td><code>undo</code></td><td>—</td><td><code>MutationResult</code></td><td>Lock → engine.undo()</td></tr>
+  <tr><td><code>redo</code></td><td>—</td><td><code>MutationResult</code></td><td>Lock → engine.redo()</td></tr>
+</table>
+
+<p>All commands return <code>Result&lt;T, String&gt;</code>. Errors are displayed in the frontend console.</p>
+
+</div>
+</details>
+
+<!-- ============ 9. BACKEND TESTS ============ -->
+<h2 id="backend-tests">9. Rust Backend — Test Suite</h2>
+
+<details>
+<summary>13 tests across 3 modules — all passing</summary>
+<div class="details-content">
+
+<h3>types_test.rs (3 tests)</h3>
+
+<table>
+  <tr><th>Test</th><th>What it verifies</th></tr>
+  <tr><td><code>test_oplog_push_and_undo</code></td><td>Pushing an entry sets position=1, can_undo=true. Undoing returns the entry, sets position=0, can_redo=true.</td></tr>
+  <tr><td><code>test_oplog_truncates_redo_on_new_push</code></td><td>Undo once then push a new entry — redo is cleared (position matches entries.length), old redo entries are truncated.</td></tr>
+  <tr><td><code>test_oplog_bounded_capacity</code></td><td>OpLog with max_entries=3 — pushing 5 entries keeps only the 3 most recent. Position is 3.</td></tr>
+</table>
+
+<h3>engine_test.rs (8 tests)</h3>
+<p>All tests use a shared <code>make_test_batch()</code> that produces a 2-column schema (name: Utf8 non-nullable, score: Int64 nullable) with 3 rows (Alice/90, Bob/85, Charlie/95).</p>
+
+<table>
+  <tr><th>Test</th><th>What it verifies</th></tr>
+  <tr><td><code>test_engine_new</code></td><td>Engine created from batch has 3 rows, 2 cols, modified=true, row_ids length 3.</td></tr>
+  <tr><td><code>test_engine_row_ids_sequential</code></td><td>Row IDs are 0, 1, 2 for the initial 3 rows.</td></tr>
+  <tr><td><code>test_engine_edit_cell</code></td><td>Edit row 1 column 0 to "Bobby" → affected length 1, schema unchanged. Getting the row returns "Bobby".</td></tr>
+  <tr><td><code>test_engine_delete_rows</code></td><td>Delete rows [0, 2] → 2 deleted, 1 remaining. Remaining row has value "Bob".</td></tr>
+  <tr><td><code>test_engine_insert_row</code></td><td>Insert at index 1 → row count 4. Inserted row has empty string for name (non-nullable → default) and null for score (nullable).</td></tr>
+  <tr><td><code>test_engine_add_column</code></td><td>Add "grade" of type utf8 → 3 columns, schema_changed=true, new column name = "grade".</td></tr>
+  <tr><td><code>test_engine_drop_column</code></td><td>Drop "score" → 1 column remaining.</td></tr>
+  <tr><td><code>test_engine_rename_column</code></td><td>Rename "name" to "full_name" → column_info[0].name = "full_name".</td></tr>
+</table>
+
+<h3>parquet_io_test.rs (2 tests)</h3>
+<p>Uses <code>tempfile::NamedTempFile</code> for actual disk I/O. Schema has 3 columns (name: Utf8, age: Int64 nullable, active: Boolean) with 3 rows.</p>
+
+<table>
+  <tr><th>Test</th><th>What it verifies</th></tr>
+  <tr><td><code>test_round_trip_parquet</code></td><td>Write → read back: schema, row count, column count are identical.</td></tr>
+  <tr><td><code>test_read_parquet_preserves_data</code></td><td>Write → read back: column values are byte-identical (Alice=Alice, Bob=Bob, Charlie=Charlie; ages 30, 25, 35 preserved).</td></tr>
+</table>
+
+<hr>
+<p><strong>Total: 13/13 tests passing.</strong> Run with: <code>cd src-tauri &amp;&amp; cargo test</code></p>
+
+</div>
+</details>
+
+<!-- ============ 10. FRONTEND TYPES & COMMANDS ============ -->
+<h2 id="frontend-types">10. Frontend — Types &amp; IPC Wrappers</h2>
+
+<details>
+<summary>types.ts and commands.ts</summary>
+<div class="details-content">
+
+<h3>types.ts — Frontend Type Definitions</h3>
+<pre>
+interface ColumnInfo {
+    name: string;
+    dtype: string;
+    nullable: boolean;
+}
+
+interface RowData {
+    row_id: number;    // u64 mapped to JS number
+    values: (string | number | boolean | null)[];
+}
+
+interface MutationResult {
+    affected: RowData[];
+    deleted_ids: number[];
+    schema_changed: boolean;
+    new_schema: ColumnInfo[] | null;
+}
+
+interface MetadataJson {
+    columns: ColumnInfo[];
+    total_rows: number;
+    file_path: string | null;
+}
+
+type SortDirection = 'asc' | 'desc' | null;
+
+interface SortConfig {
+    column: string;
+    direction: SortDirection;
+}
+
+interface SearchConfig {
+    query: string;
+    column: string | null;
+}
+</pre>
+
+<h3>commands.ts — Typed Tauri IPC Wrappers</h3>
+<p>13 async functions, each calling <code>invoke('command_name', args)</code> with full TypeScript types. Maps Rust snake_case parameter names to camelCase where needed (Tauri's invoke automatically maps back).</p>
+
+<table>
+  <tr><th>Function</th><th>Invokes</th><th>Returns</th></tr>
+  <tr><td><code>openFile(path)</code></td><td><code>open_file</code></td><td><code>Promise&lt;MetadataJson&gt;</code></td></tr>
+  <tr><td><code>saveFile()</code></td><td><code>save_file</code></td><td><code>Promise&lt;void&gt;</code></td></tr>
+  <tr><td><code>saveFileAs(path)</code></td><td><code>save_file_as</code></td><td><code>Promise&lt;void&gt;</code></td></tr>
+  <tr><td><code>getFileInfo()</code></td><td><code>get_file_info</code></td><td><code>Promise&lt;JSON&gt;</code></td></tr>
+  <tr><td><code>getAllRows()</code></td><td><code>get_all_rows</code></td><td><code>Promise&lt;RowData[]&gt;</code></td></tr>
+  <tr><td><code>editCell(rowId, colIdx, value)</code></td><td><code>edit_cell</code></td><td><code>Promise&lt;MutationResult&gt;</code></td></tr>
+  <tr><td><code>deleteRows(rowIds)</code></td><td><code>delete_rows</code></td><td><code>Promise&lt;MutationResult&gt;</code></td></tr>
+  <tr><td><code>insertRow(index)</code></td><td><code>insert_row</code></td><td><code>Promise&lt;MutationResult&gt;</code></td></tr>
+  <tr><td><code>addColumn(name, dtype)</code></td><td><code>add_column</code></td><td><code>Promise&lt;MutationResult&gt;</code></td></tr>
+  <tr><td><code>dropColumn(name)</code></td><td><code>drop_column</code></td><td><code>Promise&lt;MutationResult&gt;</code></td></tr>
+  <tr><td><code>renameColumn(oldName, newName)</code></td><td><code>rename_column</code></td><td><code>Promise&lt;MutationResult&gt;</code></td></tr>
+  <tr><td><code>undo()</code></td><td><code>undo</code></td><td><code>Promise&lt;MutationResult&gt;</code></td></tr>
+  <tr><td><code>redo()</code></td><td><code>redo</code></td><td><code>Promise&lt;MutationResult&gt;</code></td></tr>
+</table>
+
+</div>
+</details>
+
+<!-- ============ 11. FRONTEND STORE ============ -->
+<h2 id="frontend-store">11. Frontend — Svelte Store</h2>
+
+<details>
+<summary>stores/table.ts — Writable store and derived computed rows</summary>
+<div class="details-content">
+
+<p class="file-path">src/lib/stores/table.ts (146 lines)</p>
+
+<h3>TableState (writable store interface)</h3>
+<pre>
+interface TableState {
+    columns: ColumnInfo[];
+    rows: RowData[];
+    selectedRowIds: Set&lt;number&gt;;
+    sort: SortConfig;
+    search: SearchConfig;
+    modified: boolean;
+    filePath: string | null;
+}
+</pre>
+
+<h3>Store Methods</h3>
+
+<table>
+  <tr><th>Method</th><th>Behavior</th></tr>
+  <tr><td><code>toggleSort(column)</code></td><td>Cycles sort direction: none → asc → desc → none for the given column. Resets direction for other columns.</td></tr>
+  <tr><td><code>setSearch(query, column?)</code></td><td>Sets search query and optional column filter. Debounced externally in SearchBar.</td></tr>
+  <tr><td><code>applyMutation(result)</code></td><td>Patches store incrementally: removes deleted_ids, updates/inserts affected rows, updates schema if schema_changed. Sets modified=true.</td></tr>
+  <tr><td><code>selectRow(rowId, shift, ctrl)</code></td><td>With Ctrl: toggles selection. Without: clears and selects single row. (Shift range selection noted in design but not yet implemented.)</td></tr>
+  <tr><td><code>clearSelection()</code></td><td>Empties the selectedRowIds Set.</td></tr>
+  <tr><td><code>set(val)</code></td><td>Direct setter — used on file open to load initial state.</td></tr>
+</table>
+
+<h3>displayedRows — Derived Store</h3>
+<p><code>export const displayedRows = derived(tableStore, ...)</code> — Computes the filtered + sorted row view for rendering:</p>
+<ol>
+  <li><strong>Search filter</strong>: If <code>search.query</code> is set, filters rows to those where any cell's string representation contains the query (case-insensitive). If <code>search.column</code> is specified, only searches that column.</li>
+  <li><strong>Sort</strong>: If <code>sort.direction</code> is non-null, sorts rows by the specified column. Nulls sort last. Numbers sort numerically, everything else sorts as case-insensitive strings.</li>
+</ol>
+<p><strong>Important</strong>: This is a derived store (computed, not cached). It re-computes whenever <code>$tableStore</code> changes. The original <code>$tableStore.rows</code> is never mutated — only the derived view changes.</p>
+
+</div>
+</details>
+
+<!-- ============ 12. FRONTEND COMPONENTS ============ -->
+<h2 id="frontend-components">12. Frontend — Components</h2>
+
+<details>
+<summary>All 9 Svelte components with props, state, and behavior</summary>
+<div class="details-content">
+
+<h3>App.svelte</h3>
+<p><span class="file-path">src/App.svelte (138 lines)</span> — Root layout.</p>
+<ul>
+  <li><strong>Props</strong>: none (root component).</li>
+  <li><strong>State</strong>: <code>hasData</code> derived from store columns length, <code>selectedIds</code> derived from store.</li>
+  <li><strong>Behavior</strong>: On mount, registers Tauri <code>onCloseRequested</code> handler for unsaved-changes guard. Global <code>svelte:window onkeydown</code> handler for Delete key → confirms and deletes selected rows.</li>
+  <li><strong>Layout</strong>: Toolbar → (SchemaPanel + DataTable) or Welcome screen → StatusBar.</li>
+  <li><strong>Welcome screen</strong>: Shows title, description, and "Open File" button that calls Tauri dialog → openFile → getAllRows → tableStore.set(). Uses dynamic <code>import()</code> for Tauri dialog plugin.</li>
+</ul>
+
+<h3>Toolbar.svelte</h3>
+<p><span class="file-path">src/lib/components/Toolbar.svelte (125 lines)</span></p>
+<ul>
+  <li><strong>Props</strong>: none (reads store directly).</li>
+  <li><strong>UI</strong>: Two button groups: [Open, Save (disabled when !modified), Save As] and [↩ Undo, ↪ Redo]. Tauri plugin dialog for file selection. Spacer then SearchBar component.</li>
+  <li><strong>Open</strong>: Calls Tauri dialog → openFile → getAllRows → tableStore.set().</li>
+  <li><strong>Save/SaveAs</strong>: Calls save_file/save_file_as → sets modified=false.</li>
+  <li><strong>Undo/Redo</strong>: Calls undo()/redo() → applyMutation().</li>
+</ul>
+
+<h3>SearchBar.svelte</h3>
+<p><span class="file-path">src/lib/components/SearchBar.svelte (70 lines)</span></p>
+<ul>
+  <li><strong>Props</strong>: none.</li>
+  <li><strong>State</strong>: <code>query</code> (local), <code>debounceTimer</code>.</li>
+  <li><strong>Behavior</strong>: Input handler starts a 200ms debounce timer before calling <code>tableStore.setSearch(query)</code>. Clear button resets. 🔍 icon prefix.</li>
+</ul>
+
+<h3>SchemaPanel.svelte</h3>
+<p><span class="file-path">src/lib/components/SchemaPanel.svelte (247 lines)</span></p>
+<ul>
+  <li><strong>Props</strong>: none (reads store directly).</li>
+  <li><strong>State</strong>: <code>renamingCol</code>, <code>renameValue</code>, <code>addingColumn</code>, <code>newColName</code>, <code>newColType</code>.</li>
+  <li><strong>UI</strong>: Left sidebar (220px). Lists columns with name, type, and drop (✕) button (visible on hover). Double-click name to start inline rename. "Add column" button opens form with name input + type selector (Text/Int64/Int32/Float/Boolean).</li>
+  <li><strong>Smart behavior</strong>: Drop shows confirm dialog. Rename commits on Enter/blur, cancels on Escape.</li>
+</ul>
+
+<h3>DataTable.svelte</h3>
+<p><span class="file-path">src/lib/components/DataTable.svelte (85 lines)</span></p>
+<ul>
+  <li><strong>Props</strong>: none (reads store directly).</li>
+  <li><strong>State</strong>: <code>editingCell: { rowId, colIdx } | null</code>.</li>
+  <li><strong>Behavior</strong>: Orchestrates TableHeader + TableRow loop. Manages editing state at table level (only one cell editable at a time). <code>handleSave</code> calls editCell IPC → applyMutation → clear editing state. Empty state shows "No data" message.</li>
+  <li><strong>Keying</strong>: Uses <code>{#each rows as row (row.row_id)}</code> for stable identity across re-renders.</li>
+</ul>
+
+<h3>TableHeader.svelte</h3>
+<p><span class="file-path">src/lib/components/TableHeader.svelte (78 lines)</span></p>
+<ul>
+  <li><strong>Props</strong>: <code>columns: ColumnInfo[], sort: SortConfig, onSort: (col) =&gt; void</code>.</li>
+  <li><strong>UI</strong>: Row ID column (#, 48px). Each column header shows name (bold) + type (small, gray). Active sort column has blue bottom border + ▲/▼ indicator. Click cycles sort direction.</li>
+</ul>
+
+<h3>TableRow.svelte</h3>
+<p><span class="file-path">src/lib/components/TableRow.svelte (100 lines)</span></p>
+<ul>
+  <li><strong>Props</strong>: <code>row, columns, rowIndex, isSelected, editingCol, onSelect, onEdit, onSave, onCancel</code>.</li>
+  <li><strong>UI</strong>: Row with 1-indexed row ID column. Cells show formatted values (— for null, ✓/✗ for booleans). Selected row gets blue highlight background.</li>
+  <li><strong>Edit</strong>: Double-click cell enters edit mode, which renders <code>CellEditor</code> component inline. Editing cell gets 2px blue border.</li>
+</ul>
+
+<h3>CellEditor.svelte</h3>
+<p><span class="file-path">src/lib/components/CellEditor.svelte (83 lines)</span></p>
+<ul>
+  <li><strong>Props</strong>: <code>value, dtype, onSave, onCancel</code>.</li>
+  <li><strong>Behavior</strong>: On mount, sets input value from prop <code>value</code> (with formatting: null → "", boolean → "true"/"false"), focuses, and selects all text.</li>
+  <li><strong>Type-aware input</strong>: For booleans, renders a <code>&lt;select&gt;</code> with true/false options. For integers/floats, renders <code>&lt;input type="number"&gt;</code>. For strings, renders <code>&lt;input type="text"&gt;</code>.</li>
+  <li><strong>Save triggers</strong>: Enter key, blur (focus lost). For booleans, also on change.</li>
+  <li><strong>Cancel</strong>: Escape key.</li>
+</ul>
+
+<h3>StatusBar.svelte</h3>
+<p><span class="file-path">src/lib/components/StatusBar.svelte (56 lines)</span></p>
+<ul>
+  <li><strong>Props</strong>: none (reads store directly).</li>
+  <li><strong>UI</strong>: Footer bar showing: "N rows · M cols", sort info (if active), spacer, "● Modified" (orange) / "○ Saved" (gray), filename.</li>
+</ul>
+
+</div>
+</details>
+
+<!-- ============ 13. BUILD RUN VERIFY ============ -->
+<h2 id="build">13. Build, Run &amp; Verify</h2>
+
+<details>
+<summary>Commands to run the app, tests, and lint</summary>
+<div class="details-content">
+
+<h3>Development</h3>
+<pre>
+npm run tauri dev            # Start Tauri dev mode (Vite + Rust)
+</pre>
+
+<h3>Production Build</h3>
+<pre>
+npm run tauri build          # Build distributable binaries
+</pre>
+
+<h3>Rust — Compile Check</h3>
+<pre>
+cd src-tauri &amp;&amp; cargo check   # Verify Rust compilation (fast, no runtime)
+</pre>
+
+<h3>Rust — Tests (13 total)</h3>
+<pre>
+cd src-tauri &amp;&amp; cargo test    # Run all 13 unit tests
+</pre>
+
+<h3>Frontend — Build Only</h3>
+<pre>
+npm run build                # Vite production build (136 modules, ~1.3s)
+</pre>
+
+<h3>Full Verification Checklist</h3>
+<ol>
+  <li><code>cargo check</code> — Clean compilation (3 expected dead-code warnings for unused public methods/fields)</li>
+  <li><code>cargo test</code> — 13/13 passing</li>
+  <li><code>npm run build</code> — Clean Vite build (no TypeScript or Svelte errors)</li>
+</ol>
+
+</div>
+</details>
+
+<!-- ============ 14. FUTURE ============ -->
+<h2 id="future">14. Future Scaling &amp; Upgrades</h2>
+
+<details>
+<summary>Ideas discussed but not yet implemented for v0</summary>
+<div class="details-content">
+
+<h3>Performance &amp; Scale</h3>
+
+<table>
+  <tr><th>Feature</th><th>Description</th><th>Why deferred</th></tr>
+  <tr>
+    <td><strong>Virtual scrolling</strong></td>
+    <td>Replace naive <code>{#each}</code> rendering with windowed rendering (e.g., TanStack Table or custom virtualizer). Only render rows in the visible viewport + buffer zone.</td>
+    <td>v0 targets ≤30MB files (~tens of thousands of rows), which renders fine without virtualization. Beyond that, DOM nodes become a bottleneck.</td>
+  </tr>
+  <tr>
+    <td><strong>Pagination / Lazy loading</strong></td>
+    <td>For files >30MB, load data page-by-page via <code>get_data_slice(start, end)</code> Tauri command. Show page controls in the status bar.</td>
+    <td>v0 assumes full in-memory load. Pagination adds complexity to both Rust (offset-based batch slicing) and frontend (page-aware store).</td>
+  </tr>
+  <tr>
+    <td><strong>Arrow IPC binary for IPC</strong></td>
+    <td>Replace JSON serialization with Arrow IPC binary format (the native Arrow wire format). This preserves int64, Decimal128, timestamps, and large lists without precision loss.</td>
+    <td>v0 uses JSON for simplicity. Arrow IPC binary requires <code>@apache-arrow</code> JS bindings on the frontend and Tauri's asset protocol for binary streaming. The original design spec assumed this, but JSON was simpler for the initial implementation.</td>
+  </tr>
+</table>
+
+<h3>New Features</h3>
+
+<table>
+  <tr><th>Feature</th><th>Description</th><th>Implementation approach</th></tr>
+  <tr>
+    <td><strong>SQL query mode</strong></td>
+    <td>Pass-through SQL queries executed by DataFusion on the Rust side. Users type SQL, results render as a new table view.</td>
+    <td>Add <code>datafusion</code> crate dependency. Create a <code>SqlEngine</code> that wraps DataFusion's <code>SessionContext</code>. Register the loaded RecordBatch as a table. Tauri command: <code>execute_sql(sql: String) → MutationResult</code> or full result set.</td>
+  </tr>
+  <tr>
+    <td><strong>Export</strong></td>
+    <td>Export the current data to CSV, JSON, or SQLite files via Tauri save dialog.</td>
+    <td>New <code>export_</code> commands in Rust using <code>csv</code> crate, <code>serde_json</code> for JSON lines, or <code>rusqlite</code> for SQLite. Frontend gets an Export menu item.</td>
+  </tr>
+  <tr>
+    <td><strong>Column statistics</strong></td>
+    <td>Show min, max, null count, distinct count per column — either in the SchemaPanel or in a tooltip/popover.</td>
+    <td>New Tauri command <code>get_column_stats()</code> that computes stats using Arrow compute kernels (<code>min</code>, <code>max</code>, <code>null_count</code>, <code>distinct</code>). Frontend shows next to column name.</td>
+  </tr>
+  <tr>
+    <td><strong>Bulk edit / Multi-cell paste</strong></td>
+    <td>Select multiple cells → paste from clipboard or apply a formula-like transformation (e.g., "column = column * 2").</td>
+    <td>New <code>bulk_edit</code> command accepting a map of <code>(row_id, col_idx) → value</code>. Clipboard integration via Tauri's clipboard plugin.</td>
+  </tr>
+  <tr>
+    <td><strong>Side-by-side diff</strong></td>
+    <td>Open two Parquet files and highlight differences between them.</td>
+    <td>Second <code>Engine</code> instance. Row-by-row comparison based on <code>_row_id</code>. Highlight changed/inserted/deleted cells.</td>
+  </tr>
+  <tr>
+    <td><strong>Nested type support</strong></td>
+    <td>STRUCT columns show as expandable sub-headers. LIST/MAP columns show JSON preview — click to open <code>NestedValueModal</code> with syntax-highlighted view.</td>
+    <td>Implement <code>arrow_array_to_json</code> handling for <code>StructArray</code>, <code>ListArray</code>, <code>MapArray</code>. Component <code>NestedValueModal.svelte</code> with collapsible tree view.</td>
+  </tr>
+</table>
+
+<h3>UX Polish</h3>
+
+<table>
+  <tr><th>Feature</th><th>Description</th></tr>
+  <tr>
+    <td><strong>Undo/Redo button states</strong></td>
+    <td>Wire <code>can_undo</code>/<code>can_redo</code> methods to disable toolbar buttons when no history exists. Requires a frontend call to <code>get_file_info</code> or a dedicated <code>can_undo</code> command, or tracking undo stack size in the store.</td>
+  </tr>
+  <tr>
+    <td><strong>Keyboard navigation</strong></td>
+    <td>Arrow keys to move between cells, Tab to move to next cell, Enter to edit. This requires focus management across table cells and a "focused cell" state in addition to "editing cell".</td>
+  </tr>
+  <tr>
+    <td><strong>Broader type coverage</strong></td>
+    <td>Display and edit support for DATE, TIMESTAMP (millis/nanos), DECIMAL, FIXED_SIZE_BINARY. Each needs type-specific formatting, input controls, and arrow_array_to_json handling.</td>
+  </tr>
+  <tr>
+    <td><strong>Column visibility toggles</strong></td>
+    <td>Checkboxes in SchemaPanel to show/hide columns. Frontend-only filter on the columns array — no Rust changes needed.</td>
+  </tr>
+  <tr>
+    <td><strong>Shift+click range selection</strong></td>
+    <td>Select a contiguous range of rows by clicking first then shift+clicking last. Requires tracking the last clicked index in the store.</td>
+  </tr>
+  <tr>
+    <td><strong>Error toast notifications</strong></td>
+    <td>Replace console.error with in-app toast notifications for mutation failures.</td>
+  </tr>
+</table>
+
+<h3>Engineering Improvements</h3>
+
+<table>
+  <tr><th>Item</th><th>Description</th></tr>
+  <tr>
+    <td><strong>Frontend tests</strong></td>
+    <td>Component rendering tests with mock Tauri <code>invoke</code>. Use Vitest + @testing-library/svelte.</td>
+  </tr>
+  <tr>
+    <td><strong>Arrow IPC binary migration</strong></td>
+    <td>Replace JSON across the IPC boundary with Arrow IPC binary. Required: <code>@apache-arrow</code> package on frontend, Tauri asset protocol endpoint for streaming binary data.</td>
+  </tr>
+  <tr>
+    <td><strong>Chunked writing for large files</strong></td>
+    <td>In <code>write_parquet</code>, split the batch into row groups of the configured size instead of writing one monolithic group.</td>
+  </tr>
+  <tr>
+    <td><strong>Concurrent file modification warning</strong></td>
+    <td>On save, stat the file and compare mtime with the stored value. Warn the user if the file was modified externally.</td>
+  </tr>
+</table>
+
+<hr>
+
+<p><em>Document updated: 2026-05-31. v0.2 — DuckDB-powered rewrite with SQL editor, virtual scrolling, dark mode, and 18 Tauri commands. Total: 20 source files, 3 Rust tests, 12 Svelte components.</em></p>
+
+</div>
+</details>
+
+</body>
+</html>
