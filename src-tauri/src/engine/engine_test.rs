@@ -76,3 +76,242 @@ fn engine_page_loading_and_schema_dialects() {
     assert!(sqlite.contains("TEXT"));
     assert!(sqlite.contains("INTEGER"));
 }
+
+fn write_empty_parquet(path: &std::path::Path) {
+    let conn = duckdb::Connection::open_in_memory().unwrap();
+    let sql = format!(
+        "CREATE TABLE empty (a INT, b VARCHAR); COPY empty TO '{}' (FORMAT PARQUET);",
+        path.display().to_string().replace('\'', "''")
+    );
+    conn.execute_batch(&sql).unwrap();
+}
+
+#[test]
+fn insert_row_returns_row_aligned_with_columns() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("sample.parquet");
+    write_sample_parquet(&path);
+
+    let mut engine = DuckDbEngine::open_parquet(path.to_str().unwrap()).unwrap();
+    let columns = engine.column_info().unwrap();
+
+    let result = engine.insert_row().unwrap();
+    assert_eq!(result.rows.len(), 1);
+    let row = &result.rows[0];
+
+    assert_eq!(
+        row.values.len(),
+        columns.len(),
+        "inserted row values must align with data columns (RETURNING must not duplicate _row_id)"
+    );
+    assert_eq!(row.row_id, 1023);
+    assert_eq!(row.values[0], serde_json::json!(0), "BIGINT default 0");
+    assert_eq!(row.values[1], serde_json::json!(""), "VARCHAR default ''");
+
+    let rows = engine.get_all_rows().unwrap();
+    assert_eq!(rows.len(), 1023);
+}
+
+#[test]
+fn alter_table_add_drop_column_is_supported() {
+    let conn = duckdb::Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE t (a INT); INSERT INTO t VALUES (1), (2);").unwrap();
+    conn.execute_batch("ALTER TABLE t ADD COLUMN b INT DEFAULT 0;").unwrap();
+    conn.execute_batch("UPDATE t SET b = 7;").unwrap();
+    conn.execute_batch("ALTER TABLE t DROP COLUMN b;").unwrap();
+    let cols: Vec<String> = conn
+        .prepare("SELECT column_name FROM information_schema.columns WHERE table_name = 't'")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(cols, vec!["a"]);
+}
+
+#[test]
+fn create_index_on_row_id_is_supported() {
+    let conn = duckdb::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE t (_row_id BIGINT, a INT); \
+         INSERT INTO t SELECT range, range FROM range(1000); \
+         CREATE INDEX idx_rowid ON t(_row_id);",
+    )
+    .unwrap();
+}
+
+#[test]
+fn open_parquet_with_glob_metachars_in_filename() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("data[1].parquet");
+    write_sample_parquet(&path);
+
+    let engine = DuckDbEngine::open_parquet(path.to_str().unwrap())
+        .unwrap_or_else(|e| panic!("opening a literal file named data[1].parquet failed: {}", e));
+    assert_eq!(engine.row_count(), 1022);
+}
+
+#[test]
+fn column_name_cannot_inject_sql() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("evil.parquet");
+    let conn = duckdb::Connection::open_in_memory().unwrap();
+    let evil_name = "x\" = 5 WHERE _row_id = 1; UPDATE working SET x = 999; --";
+    let sql = format!(
+        "CREATE TABLE sample (\"x\" INT, \"{}\" INT); \
+         INSERT INTO sample VALUES (1, 2), (3, 4); \
+         COPY sample TO '{}' (FORMAT PARQUET);",
+        evil_name.replace('"', "\"\""),
+        path.display().to_string().replace('\'', "''")
+    );
+    conn.execute_batch(&sql).unwrap();
+
+    let mut engine = DuckDbEngine::open_parquet(path.to_str().unwrap()).unwrap();
+    let columns = engine.column_info().unwrap();
+    let evil_idx = columns
+        .iter()
+        .position(|c| c.name.contains("UPDATE"))
+        .expect("evil column should be present");
+
+    engine
+        .edit_cell(1, evil_idx, &serde_json::json!(7), &columns)
+        .unwrap();
+
+    let rows = engine.get_all_rows().unwrap();
+    assert!(
+        rows.iter().all(|r| r.values[0] != serde_json::json!(999)),
+        "editing the quoted-name column must not execute injected UPDATEs on column x"
+    );
+    assert_eq!(rows[0].values[0], serde_json::json!(1));
+    assert_eq!(rows[1].values[0], serde_json::json!(3));
+}
+
+#[test]
+fn failed_mutation_leaves_engine_usable() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("sample.parquet");
+    write_sample_parquet(&path);
+
+    let mut engine = DuckDbEngine::open_parquet(path.to_str().unwrap()).unwrap();
+    let columns = engine.column_info().unwrap();
+    let before = engine.can_undo();
+
+    let err = engine
+        .edit_cell(1, 999, &serde_json::json!(5), &columns)
+        .unwrap_err();
+    assert!(!err.is_empty(), "out-of-range col_idx must return an error, not panic");
+
+    assert_eq!(engine.can_undo(), before, "failed mutation must not push a savepoint");
+    assert_eq!(engine.row_count(), 1022, "engine must remain usable after a failed mutation");
+}
+
+#[test]
+fn empty_parquet_opens_and_reads_zero_rows() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("empty.parquet");
+    write_empty_parquet(&path);
+
+    let engine = DuckDbEngine::open_parquet(path.to_str().unwrap()).unwrap();
+    assert_eq!(engine.row_count(), 0);
+let columns = engine.column_info().unwrap();
+    assert_eq!(columns.len(), 2);
+
+    let rows = engine.get_all_rows().unwrap();
+    assert!(rows.is_empty(), "0-row file must return an empty row list, not an error");
+}
+
+#[test]
+fn undo_redo_round_trips_for_all_mutations() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("sample.parquet");
+    write_sample_parquet(&path);
+
+    let mut engine = DuckDbEngine::open_parquet(path.to_str().unwrap()).unwrap();
+    let columns = engine.column_info().unwrap();
+    let id_idx = columns.iter().position(|c| c.name == "id").unwrap();
+
+    // 1. edit_cell -> undo -> redo
+    engine
+        .edit_cell(1, id_idx, &serde_json::json!(999), &columns)
+        .unwrap();
+    assert_eq!(engine.get_all_rows().unwrap()[0].values[id_idx], serde_json::json!(999));
+    engine.undo().unwrap();
+    assert_eq!(engine.get_all_rows().unwrap()[0].values[id_idx], serde_json::json!(0));
+    engine.redo().unwrap();
+    assert_eq!(engine.get_all_rows().unwrap()[0].values[id_idx], serde_json::json!(999));
+    engine.undo().unwrap(); // back to clean state
+
+    // 2. insert_row -> undo -> redo
+    let inserted = engine.insert_row().unwrap();
+    let new_id = inserted.rows[0].row_id;
+    assert_eq!(engine.row_count(), 1023);
+    engine.undo().unwrap();
+    assert_eq!(engine.row_count(), 1022);
+    engine.redo().unwrap();
+    assert_eq!(engine.row_count(), 1023);
+    assert!(engine.get_all_rows().unwrap().iter().any(|r| r.row_id == new_id));
+    engine.undo().unwrap();
+
+    // 3. delete_rows -> undo
+    let doomed = vec![2u64, 4u64];
+    engine.delete_rows(&doomed).unwrap();
+    assert_eq!(engine.row_count(), 1020);
+    engine.undo().unwrap();
+    assert_eq!(engine.row_count(), 1022);
+    let rows = engine.get_all_rows().unwrap();
+    assert!(rows.iter().any(|r| r.row_id == 2), "deleted row 2 restored with original row_id");
+    assert!(rows.iter().any(|r| r.row_id == 4), "deleted row 4 restored with original row_id");
+
+    // 4. add_column -> undo -> redo
+    engine.add_column("extra", "int64").unwrap();
+    assert!(engine.column_info().unwrap().iter().any(|c| c.name == "extra"));
+    engine.undo().unwrap();
+    assert!(!engine.column_info().unwrap().iter().any(|c| c.name == "extra"));
+    engine.redo().unwrap();
+    assert!(engine.column_info().unwrap().iter().any(|c| c.name == "extra"));
+    engine.undo().unwrap();
+
+    // 5. drop_column -> undo restores values
+    engine.drop_column("score").unwrap();
+    assert!(!engine.column_info().unwrap().iter().any(|c| c.name == "score"));
+    engine.undo().unwrap();
+    let restored = engine.column_info().unwrap();
+    let score_col = restored.iter().find(|c| c.name == "score").unwrap();
+    assert_eq!(score_col.dtype, "DECIMAL(21,1)", "dropped-column type preserved");
+    assert!(restored.iter().any(|c| c.name == "score"), "score column restored");
+    let score_idx = restored.iter().position(|c| c.name == "score").unwrap();
+    // score is DECIMAL(21,1) in the sample data (BIGINT * DECIMAL), which this
+    // engine renders as a string — type and value must survive the round-trip
+    assert_eq!(
+        engine.get_all_rows().unwrap()[5].values[score_idx],
+        serde_json::json!("7.5"),
+        "dropped-column values restored after undo"
+    );
+
+    // 6. rename_column -> undo
+    engine.rename_column("name", "label").unwrap();
+    assert!(engine.column_info().unwrap().iter().any(|c| c.name == "label"));
+    engine.undo().unwrap();
+    assert!(engine.column_info().unwrap().iter().any(|c| c.name == "name"));
+
+    // 7. new mutation clears the redo stack
+    assert!(engine.can_redo(), "undone mutations are redoable");
+    engine.edit_cell(1, id_idx, &serde_json::json!(1), &columns).unwrap();
+    assert!(!engine.can_redo(), "new mutation must invalidate redo history");
+
+    // 8. undo cap keeps engine functional (550 edits, cap 500)
+    for i in 0..550u64 {
+        engine
+            .edit_cell(1, id_idx, &serde_json::json!(i), &columns)
+            .unwrap();
+    }
+    assert_eq!(engine.row_count(), 1022);
+    for _ in 0..10 {
+        engine.undo().unwrap();
+    }
+    assert_eq!(
+        engine.get_all_rows().unwrap()[0].values[id_idx],
+        serde_json::json!(539),
+        "10 undos from value 549 must land on 539"
+    );
+}

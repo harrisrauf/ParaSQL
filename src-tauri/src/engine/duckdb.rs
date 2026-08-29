@@ -12,15 +12,25 @@ pub struct DuckDbEngine {
     table_name: String,
     page_size: usize,
     file_metadata: Option<FileMetadata>,
-    undo_stack: Vec<Savepoint>,
-    redo_stack: Vec<Savepoint>,
-    sp_counter: u64,
+    undo_stack: Vec<UndoEntry>,
+    redo_stack: Vec<UndoEntry>,
 }
 
-/// A saved mutation point, plus the SQL needed to re-apply it on redo
-struct Savepoint {
-    name: String,
-    sql: String,
+/// Max undo steps kept in memory. Older entries are evicted (with cleanup).
+const UNDO_LIMIT: usize = 500;
+
+/// Index on _row_id. Dropped around column ALTERs because DuckDB blocks
+/// ALTER TABLE while catalog entries depend on it.
+const ROW_ID_INDEX: &str = "idx_working_rowid";
+
+/// A recorded mutation: `redo_sql` re-applies it, `undo_sql` reverses it.
+/// DuckDB has no SAVEPOINT support, so undo is implemented by executing the
+/// inverse statement (computed at mutation time).
+struct UndoEntry {
+    redo_sql: String,
+    undo_sql: String,
+    /// Runs when the entry is evicted without being undone (e.g. undo-stack cap).
+    cleanup_sql: Option<String>,
 }
 
 impl DuckDbEngine {
@@ -43,6 +53,10 @@ impl DuckDbEngine {
         )
         .map_err(|e| format!("Failed to create working table: {}", e))?;
 
+        // Index _row_id: point edits/deletes/pagination become O(log n)
+        conn.execute_batch("CREATE INDEX idx_working_rowid ON working(_row_id)")
+            .map_err(|e| format!("Failed to index _row_id: {}", e))?;
+
         let row_count: i64 = conn
             .query_row("SELECT count(*) FROM working", [], |row| row.get(0))
             .map_err(|e| format!("Failed to count rows: {}", e))?;
@@ -59,7 +73,6 @@ impl DuckDbEngine {
             }),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            sp_counter: 0,
         })
     }
 
@@ -83,6 +96,10 @@ impl DuckDbEngine {
         )
         .map_err(|e| format!("Failed to create working table: {}", e))?;
 
+        // Index _row_id: point edits/deletes/pagination become O(log n)
+        conn.execute_batch("CREATE INDEX idx_working_rowid ON working(_row_id)")
+            .map_err(|e| format!("Failed to index _row_id: {}", e))?;
+
         let row_count: i64 = conn
             .query_row("SELECT count(*) FROM working", [], |row| row.get(0))
             .map_err(|e| format!("Failed to count rows: {}", e))?;
@@ -99,23 +116,34 @@ impl DuckDbEngine {
             }),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            sp_counter: 0,
         })
     }
 
-    /// Create a savepoint for undo/redo, remembering the SQL to re-apply on redo
-    fn create_savepoint(&mut self, sql: &str) -> Result<(), String> {
-        let name = format!("sp_{}", self.sp_counter);
-        self.sp_counter += 1;
-        self.conn
-            .execute_batch(&format!("SAVEPOINT {}", name))
-            .map_err(|e| format!("Failed to create savepoint: {}", e))?;
-        self.undo_stack.push(Savepoint {
-            name,
-            sql: sql.to_string(),
+    /// Wrap ALTER statements so the _row_id index doesn't block them.
+    /// DuckDB refuses ALTER TABLE while catalog entries depend on the table.
+    fn alter_without_index(&self, stmts: &str) -> String {
+        format!(
+            "DROP INDEX IF EXISTS {}; {}; CREATE INDEX IF NOT EXISTS {} ON {}(_row_id)",
+            ROW_ID_INDEX, stmts, ROW_ID_INDEX, self.table_name
+        )
+    }
+
+    /// Record a mutation for undo/redo. `redo_sql` re-applies it, `undo_sql`
+    /// reverses it. New mutations invalidate the redo stack. The stack is
+    /// capped at UNDO_LIMIT; evicted entries run their cleanup SQL.
+    fn push_undo(&mut self, redo_sql: String, undo_sql: String, cleanup_sql: Option<String>) {
+        self.redo_stack.clear(); // New action invalidates redo history
+        if self.undo_stack.len() >= UNDO_LIMIT {
+            let evicted = self.undo_stack.remove(0);
+            if let Some(cleanup) = evicted.cleanup_sql {
+                let _ = self.conn.execute_batch(&cleanup);
+            }
+        }
+        self.undo_stack.push(UndoEntry {
+            redo_sql,
+            undo_sql,
+            cleanup_sql,
         });
-        self.redo_stack.clear(); // Clear redo on new action
-        Ok(())
     }
 
     pub fn row_count(&self) -> usize {
@@ -228,43 +256,36 @@ impl DuckDbEngine {
 
     /// Edit a cell value
     pub fn edit_cell(&mut self, row_id: u64, col_idx: usize, value: &JsonValue, columns: &[ColumnInfo]) -> Result<QueryResult, String> {
-        let col = &columns[col_idx];
-        let sql = match value {
-            JsonValue::Null => format!(
-                "UPDATE {} SET \"{}\" = NULL WHERE _row_id = {}",
-                self.table_name, col.name, row_id
-            ),
-            JsonValue::String(s) => {
-                let escaped = s.replace('\'', "''");
-                format!(
-                    "UPDATE {} SET \"{}\" = '{}' WHERE _row_id = {}",
-                    self.table_name, col.name, escaped, row_id
-                )
-            }
-            JsonValue::Number(n) => {
-                let v = if let Some(i) = n.as_i64() {
-                    i.to_string()
-                } else if let Some(f) = n.as_f64() {
-                    f.to_string()
-                } else {
-                    return Err("Invalid number".to_string());
-                };
-                format!(
-                    "UPDATE {} SET \"{}\" = {} WHERE _row_id = {}",
-                    self.table_name, col.name, v, row_id
-                )
-            }
-            JsonValue::Bool(b) => format!(
-                "UPDATE {} SET \"{}\" = {} WHERE _row_id = {}",
-                self.table_name, col.name, if *b { "TRUE" } else { "FALSE" }, row_id
-            ),
-            _ => format!(
-                "UPDATE {} SET \"{}\" = '{}' WHERE _row_id = {}",
-                self.table_name, col.name, value.to_string().replace('\'', "''"), row_id
-            ),
-        };
+        let col = columns
+            .get(col_idx)
+            .ok_or_else(|| format!("Invalid column index: {}", col_idx))?;
+        let col_ident = quote_ident(&col.name);
 
-        self.create_savepoint(&sql)?;
+        // Capture the current value so undo can restore it
+        let select_sql = format!(
+            "SELECT * FROM {} WHERE _row_id = {}",
+            self.table_name, row_id
+        );
+        let batch = self.query_to_batch(&select_sql)?;
+        let existing = rows_from_batch(&batch, 0)?;
+        let old_value = existing
+            .first()
+            .and_then(|r| r.values.get(col_idx).cloned())
+            .unwrap_or(JsonValue::Null);
+
+        let new_literal = json_to_literal(value)?;
+        let old_literal = json_to_literal(&old_value)?;
+
+        let sql = format!(
+            "UPDATE {} SET {} = {} WHERE _row_id = {}",
+            self.table_name, col_ident, new_literal, row_id
+        );
+        let inverse = format!(
+            "UPDATE {} SET {} = {} WHERE _row_id = {}",
+            self.table_name, col_ident, old_literal, row_id
+        );
+
+        self.push_undo(sql.clone(), inverse, None);
 
         self.conn
             .execute_batch(&sql)
@@ -295,7 +316,40 @@ impl DuckDbEngine {
             self.table_name,
             ids_str.join(",")
         );
-        self.create_savepoint(&sql)?;
+
+        // Capture the rows before deletion so undo can restore them
+        let select_sql = format!(
+            "SELECT * FROM {} WHERE _row_id IN ({})",
+            self.table_name,
+            ids_str.join(",")
+        );
+        let batch = self.query_to_batch(&select_sql)?;
+        let doomed = rows_from_batch(&batch, 0)?;
+
+        let columns = self.column_info()?;
+        let col_idents: Vec<String> = columns.iter().map(|c| quote_ident(&c.name)).collect();
+        let mut values_sql: Vec<String> = Vec::new();
+        for r in &doomed {
+            let literals: Result<Vec<String>, String> = r
+                .values
+                .iter()
+                .map(json_to_literal)
+                .collect();
+            let literals = literals?;
+            values_sql.push(format!(
+                "({}, {})",
+                r.row_id,
+                literals.join(", ")
+            ));
+        }
+        let inverse = format!(
+            "INSERT INTO {} (_row_id, {}) VALUES {}",
+            self.table_name,
+            col_idents.join(", "),
+            values_sql.join(", ")
+        );
+
+        self.push_undo(sql.clone(), inverse, None);
 
         self.conn
             .execute_batch(&sql)
@@ -311,12 +365,11 @@ impl DuckDbEngine {
             return Err("No columns to insert".to_string());
         }
 
-        let col_names: Vec<String> = columns.iter().map(|c| format!("\"{}\"", c.name)).collect();
-        let col_types: Vec<String> = columns.iter().map(|c| c.dtype.clone()).collect();
+        let col_idents: Vec<String> = columns.iter().map(|c| quote_ident(&c.name)).collect();
 
         // Build DEFAULT values based on column types
-        let defaults: Vec<String> = col_types.iter().map(|dt| {
-            match dt.to_lowercase().as_str() {
+        let defaults: Vec<String> = columns.iter().map(|c| {
+            match c.dtype.to_lowercase().as_str() {
                 "int32" | "int64" | "integer" | "bigint" => "0".to_string(),
                 "float32" | "float64" | "float" | "double" => "0.0".to_string(),
                 "boolean" | "bool" => "FALSE".to_string(),
@@ -327,19 +380,40 @@ impl DuckDbEngine {
             }
         }).collect();
 
+        // Materialize the row_id now so undo/redo are exact and deterministic
+        let row_id_sql = format!(
+            "SELECT COALESCE(MAX(_row_id), 0) + 1 FROM {}",
+            self.table_name
+        );
+        let new_row_id: i64 = self
+            .conn
+            .query_row(&row_id_sql, [], |row| row.get(0))
+            .map_err(|e| format!("Failed to compute new row id: {}", e))?;
+
         let sql = format!(
-            "INSERT INTO {} (_row_id, {}) \
-             VALUES ((SELECT COALESCE(MAX(_row_id), 0) + 1 FROM {}), {}) \
-             RETURNING _row_id, *",
+            "INSERT INTO {} (_row_id, {}) VALUES ({}, {})",
             self.table_name,
-            col_names.join(", "),
-            self.table_name,
+            col_idents.join(", "),
+            new_row_id,
             defaults.join(", ")
         );
+        let inverse = format!(
+            "DELETE FROM {} WHERE _row_id = {}",
+            self.table_name, new_row_id
+        );
 
-        self.create_savepoint(&sql)?;
+        self.push_undo(sql.clone(), inverse, None);
 
-        let batch = self.query_to_batch(&sql)?;
+        self.conn
+            .execute_batch(&sql)
+            .map_err(|e| format!("Failed to insert row: {}", e))?;
+
+        // Fetch the inserted row (no RETURNING dependency)
+        let row_sql = format!(
+            "SELECT * FROM {} WHERE _row_id = {}",
+            self.table_name, new_row_id
+        );
+        let batch = self.query_to_batch(&row_sql)?;
         let rows = rows_from_batch(&batch, 0)?;
         Ok(QueryResult {
             columns: self.column_info()?,
@@ -359,23 +433,26 @@ impl DuckDbEngine {
             _ => "VARCHAR",
         };
 
-        // DuckDB can't ALTER TABLE ADD COLUMN, so we recreate
-        let escaped = name.replace('"', "\"\"");
+        // Backfill existing rows with the type's default value
         let default_val = match duckdb_type {
-            "VARCHAR" => "''::VARCHAR".to_string(),
+            "VARCHAR" => "''".to_string(),
             "BOOLEAN" => "FALSE".to_string(),
-            other => format!("CAST(NULL AS {})", other),
+            _ => "NULL".to_string(),
         };
         let sql = format!(
-            "CREATE TABLE working_backup AS SELECT * FROM {}; \
-             DROP TABLE {}; \
-             CREATE TABLE {} AS SELECT *, {} AS \"{}\" FROM working_backup; \
-             DROP TABLE working_backup;",
-            self.table_name, self.table_name, self.table_name,
-            default_val, escaped
+            "ALTER TABLE {} ADD COLUMN {} {} DEFAULT {}",
+            self.table_name,
+            quote_ident(name),
+            duckdb_type,
+            default_val
         );
+        let inverse = self.alter_without_index(&format!(
+            "ALTER TABLE {} DROP COLUMN {}",
+            self.table_name,
+            quote_ident(name)
+        ));
 
-        self.create_savepoint(&sql)?;
+        self.push_undo(sql.clone(), inverse, None);
 
         self.conn
             .execute_batch(&sql)
@@ -383,30 +460,69 @@ impl DuckDbEngine {
         Ok(())
     }
 
-    /// Drop a column (recreate table without it)
+    /// Drop a column. Values are captured at drop time and embedded in the
+    /// inverse statement as a literal VALUES list, so undo restores them
+    /// without any auxiliary table (DuckDB blocks ALTER TABLE while catalog
+    /// entries depend on it; the _row_id index is temporarily dropped around
+    /// the ALTER to avoid that).
     pub fn drop_column(&mut self, name: &str) -> Result<(), String> {
         let columns = self.column_info()?;
-        let remaining: Vec<String> = columns
-            .iter()
-            .filter(|c| c.name != name)
-            .map(|c| format!("\"{}\"", c.name))
-            .collect();
-
-        if remaining.is_empty() {
+        if columns.len() <= 1 {
             return Err("Cannot drop the last column".to_string());
+        }
+        if !columns.iter().any(|c| c.name == name) {
+            return Err(format!("Column '{}' does not exist", name));
+        }
+
+        let col_ident = quote_ident(name);
+        let dtype = columns
+            .iter()
+            .find(|c| c.name == name)
+            .map(|c| c.dtype.clone())
+            .unwrap_or_else(|| "VARCHAR".to_string());
+
+        // Capture the column values so undo can restore them exactly
+        let capture_sql = format!(
+            "SELECT _row_id, {} FROM {}",
+            col_ident, self.table_name
+        );
+        let batch = self.query_to_batch(&capture_sql)?;
+        let captured = rows_from_batch(&batch, 0)?;
+
+        let mut values_sql: Vec<String> = Vec::new();
+        for r in &captured {
+            let lit = r
+                .values
+                .first()
+                .map(json_to_literal)
+                .unwrap_or_else(|| Ok("NULL".to_string()))?;
+            values_sql.push(format!("({}, {})", r.row_id, lit));
         }
 
         let sql = format!(
-            "CREATE TABLE working_backup AS SELECT _row_id, {}; \
-             DROP TABLE {}; \
-             CREATE TABLE {} AS SELECT * FROM working_backup; \
-             DROP TABLE working_backup;",
-            remaining.join(", "),
-            self.table_name,
-            self.table_name
+            "DROP INDEX IF EXISTS {}; \
+             ALTER TABLE {} DROP COLUMN {}; \
+             CREATE INDEX IF NOT EXISTS {} ON {}(_row_id)",
+            ROW_ID_INDEX, self.table_name, col_ident, ROW_ID_INDEX, self.table_name
         );
 
-        self.create_savepoint(&sql)?;
+        let mut inverse = format!(
+            "DROP INDEX IF EXISTS {}; \
+             ALTER TABLE {} ADD COLUMN {} {};",
+            ROW_ID_INDEX, self.table_name, col_ident, dtype
+        );
+        if !values_sql.is_empty() {
+            inverse.push_str(&format!(
+                " UPDATE {} SET {} = v.{} FROM (VALUES {}) AS v(_row_id, {}) WHERE {}._row_id = v._row_id;",
+                self.table_name, col_ident, col_ident, values_sql.join(", "), col_ident, self.table_name
+            ));
+        }
+        inverse.push_str(&format!(
+            " CREATE INDEX IF NOT EXISTS {} ON {}(_row_id);",
+            ROW_ID_INDEX, self.table_name
+        ));
+
+        self.push_undo(sql.clone(), inverse, None);
 
         self.conn
             .execute_batch(&sql)
@@ -416,17 +532,23 @@ impl DuckDbEngine {
 
     /// Rename a column
     pub fn rename_column(&mut self, old_name: &str, new_name: &str) -> Result<(), String> {
-        let escaped_old = old_name.replace('"', "\"\"");
-        let escaped_new = new_name.replace('"', "\"\"");
-        let sql = format!(
-            "ALTER TABLE {} RENAME COLUMN \"{}\" TO \"{}\"",
-            self.table_name, escaped_old, escaped_new
-        );
+        let forward = self.alter_without_index(&format!(
+            "ALTER TABLE {} RENAME COLUMN {} TO {}",
+            self.table_name,
+            quote_ident(old_name),
+            quote_ident(new_name)
+        ));
+        let inverse = self.alter_without_index(&format!(
+            "ALTER TABLE {} RENAME COLUMN {} TO {}",
+            self.table_name,
+            quote_ident(new_name),
+            quote_ident(old_name)
+        ));
 
-        self.create_savepoint(&sql)?;
+        self.push_undo(forward.clone(), inverse, None);
 
         self.conn
-            .execute_batch(&sql)
+            .execute_batch(&forward)
             .map_err(|e| format!("Failed to rename column: {}", e))?;
         Ok(())
     }
@@ -438,7 +560,7 @@ impl DuckDbEngine {
             .iter()
             .map(|c| {
                 let nullable = if c.nullable { "" } else { " NOT NULL" };
-                format!("  \"{}\" {}{}", c.name, map_type(&c.dtype, dialect), nullable)
+                format!("  {} {}{}", quote_ident(&c.name), map_type(&c.dtype, dialect), nullable)
             })
             .collect();
 
@@ -563,36 +685,27 @@ impl DuckDbEngine {
         Ok(())
     }
 
-    /// Undo the last mutation
+    /// Undo the last mutation by executing its inverse statement
     pub fn undo(&mut self) -> Result<(), String> {
         let entry = self.undo_stack.pop()
             .ok_or_else(|| "Nothing to undo".to_string())?;
 
         self.conn
-            .execute_batch(&format!("ROLLBACK TO SAVEPOINT {}", entry.name))
-            .map_err(|e| format!("Failed to rollback: {}", e))?;
-
-        self.conn
-            .execute_batch(&format!("RELEASE SAVEPOINT {}", entry.name))
-            .map_err(|e| format!("Failed to release savepoint: {}", e))?;
+            .execute_batch(&entry.undo_sql)
+            .map_err(|e| format!("Failed to undo: {}", e))?;
 
         self.redo_stack.push(entry);
         Ok(())
     }
 
-    /// Redo the last undone mutation by re-applying its SQL
+    /// Redo the last undone mutation by re-applying its forward statement
     pub fn redo(&mut self) -> Result<(), String> {
         let entry = self.redo_stack.pop()
             .ok_or_else(|| "Nothing to redo".to_string())?;
 
         self.conn
-            .execute_batch(&entry.sql)
+            .execute_batch(&entry.redo_sql)
             .map_err(|e| format!("Failed to redo: {}", e))?;
-
-        // Re-create the savepoint so the mutation can be undone again
-        self.conn
-            .execute_batch(&format!("SAVEPOINT {}", entry.name))
-            .map_err(|e| format!("Failed to create savepoint: {}", e))?;
 
         self.undo_stack.push(entry);
         Ok(())
@@ -608,7 +721,9 @@ impl DuckDbEngine {
         !self.redo_stack.is_empty()
     }
 
-    /// Internal: execute SQL and get Arrow RecordBatch
+    /// Internal: execute SQL and get Arrow RecordBatch.
+    /// Returns an empty-schema batch (0 rows) when the query yields no results,
+    /// so empty files, past-end pages and non-SELECT statements behave cleanly.
     fn query_to_batch(&self, sql: &str) -> Result<RecordBatch, String> {
         let mut stmt = self
             .conn
@@ -626,7 +741,7 @@ impl DuckDbEngine {
         }
 
         if batches.is_empty() {
-            return Err("Query returned no results".to_string());
+            return Ok(RecordBatch::new_empty(schema));
         }
         if batches.len() == 1 {
             return Ok(batches.remove(0));
@@ -638,6 +753,31 @@ impl DuckDbEngine {
 }
 
 // --- Arrow to JSON conversion (supports nested types) ---
+
+/// Quote a SQL identifier (column/table name) for safe interpolation.
+/// Doubles embedded double-quotes per SQL standard.
+fn quote_ident(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\"\""))
+}
+
+/// Render a serde_json value as a SQL literal (values are always parameter-escaped).
+fn json_to_literal(v: &JsonValue) -> Result<String, String> {
+    match v {
+        JsonValue::Null => Ok("NULL".to_string()),
+        JsonValue::String(s) => Ok(format!("'{}'", s.replace('\'', "''"))),
+        JsonValue::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(i.to_string())
+            } else if let Some(f) = n.as_f64() {
+                Ok(f.to_string())
+            } else {
+                Err("Invalid number".to_string())
+            }
+        }
+        JsonValue::Bool(b) => Ok(if *b { "TRUE" } else { "FALSE" }.to_string()),
+        _ => Ok(format!("'{}'", v.to_string().replace('\'', "''"))),
+    }
+}
 
 /// Map a DuckDB column type to the requested SQL dialect
 fn map_type(dtype: &str, dialect: &str) -> String {
