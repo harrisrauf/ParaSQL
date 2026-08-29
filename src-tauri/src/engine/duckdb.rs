@@ -666,7 +666,16 @@ impl DuckDbEngine {
                     JsonValue::Bool(b) => worksheet.write_boolean(r, col as u16, b),
                     JsonValue::Number(n) => {
                         if let Some(f) = n.as_f64() {
-                            worksheet.write_number(r, col as u16, f)
+                            // Preserve integer precision beyond 2^53 — Excel can't hold
+                            // it as a number, so write it as text
+                            let lossy = n
+                                .as_i64()
+                                .is_some_and(|i| (i as f64) as i64 != i);
+                            if lossy {
+                                worksheet.write_string(r, col as u16, n.to_string())
+                            } else {
+                                worksheet.write_number(r, col as u16, f)
+                            }
                         } else {
                             worksheet.write_string(r, col as u16, n.to_string())
                         }

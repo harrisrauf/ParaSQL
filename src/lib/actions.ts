@@ -228,7 +228,8 @@ export async function copyValue(value: string): Promise<void> {
 }
 
 export async function copyAsWhere(colName: string, value: string): Promise<void> {
-  await navigator.clipboard.writeText(`${colName} = '${value}'`);
+  const escaped = value.replace(/'/g, "''");
+  await navigator.clipboard.writeText(`${colName} = '${escaped}'`);
 }
 
 export async function copyRowAsJson(row: RowData): Promise<void> {

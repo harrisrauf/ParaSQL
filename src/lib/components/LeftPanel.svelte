@@ -37,6 +37,8 @@
         await renameColumn(renamingCol, renameValue);
         const [rows, cols] = await Promise.all([getAllRows(), getColumns()]);
         tableStore.update(s => ({ ...s, rows, columns: cols, modified: true }));
+        tableStore.clearFilters();
+        tableStore.clearSelection();
       } catch (err) {
         console.error('Failed to rename column:', err);
       }
@@ -50,6 +52,8 @@
       await dropColumn(name);
       const [rows, cols] = await Promise.all([getAllRows(), getColumns()]);
       tableStore.update(s => ({ ...s, rows, columns: cols, modified: true }));
+        tableStore.clearFilters();
+        tableStore.clearSelection();
     } catch (err) {
       console.error('Failed to drop column:', err);
     }
@@ -61,6 +65,8 @@
       await addColumn(newColName, newColType);
       const [rows, cols] = await Promise.all([getAllRows(), getColumns()]);
       tableStore.update(s => ({ ...s, rows, columns: cols, modified: true }));
+        tableStore.clearFilters();
+        tableStore.clearSelection();
       newColName = '';
       addingColumn = false;
     } catch (err) {

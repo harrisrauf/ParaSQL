@@ -1,13 +1,14 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { EditorView, keymap, placeholder as ph } from '@codemirror/view';
-  import { EditorState } from '@codemirror/state';
+  import { Compartment, EditorState } from '@codemirror/state';
   import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
   import { sql, MySQL, PostgreSQL } from '@codemirror/lang-sql';
   import { oneDark } from '@codemirror/theme-one-dark';
   import { autocompletion } from '@codemirror/autocomplete';
   import { bracketMatching } from '@codemirror/language';
   import { tableStore } from '../stores/table';
+  import { settings } from '../stores/settings';
   import { executeSql } from '../commands';
   import type { QueryResult } from '../types';
 
@@ -19,13 +20,12 @@
 
   let columns = $derived($tableStore.columns);
   let sqlResult = $derived($tableStore.sqlResult);
+  let dark = $derived($settings.darkMode);
 
-  let darkMode = $state(false);
+  const themeCompartment = new Compartment();
+  const schemaCompartment = new Compartment();
 
   onMount(() => {
-    // Check for dark mode
-    darkMode = document.documentElement.classList.contains('dark');
-
     if (!editorEl) return;
 
     const schemaCompletion = sql({
@@ -45,11 +45,11 @@
         history(),
         bracketMatching(),
         autocompletion(),
-        schemaCompletion,
+        schemaCompartment.of(schemaCompletion),
         ph('Type SQL query... (Ctrl+Enter to run)'),
         runKeymap,
         keymap.of([...defaultKeymap, ...historyKeymap]),
-        darkMode ? oneDark : [],
+        themeCompartment.of(dark ? oneDark : []),
         EditorView.lineWrapping,
         EditorView.theme({
           '&': { fontSize: '13px', minHeight: '80px', maxHeight: '200px', overflow: 'auto' },
@@ -69,11 +69,21 @@
     editorView?.destroy();
   });
 
-  // Update theme when dark mode changes
+  // Reconfigure theme when dark mode changes
   $effect(() => {
-    if (!editorView) return;
-    // Recreate editor with new theme on dark mode change
-    // This is a simplified approach - a full implementation would use reconfigure
+    const view = editorView;
+    if (!view) return;
+    view.dispatch({ effects: themeCompartment.reconfigure(dark ? oneDark : []) });
+  });
+
+  // Refresh schema completions when columns change (file opened, schema edited)
+  $effect(() => {
+    const view = editorView;
+    if (!view) return;
+    const schemaCompletion = sql({
+      schema: columns.length > 0 ? { working: columns.map(col => col.name) } : undefined,
+    });
+    view.dispatch({ effects: schemaCompartment.reconfigure(schemaCompletion) });
   });
 
   async function runQuery() {

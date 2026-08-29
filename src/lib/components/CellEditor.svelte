@@ -10,6 +10,7 @@
 
   let inputValue = $state('');
   let inputEl: HTMLInputElement | HTMLSelectElement | undefined = $state();
+  let committed = false;
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Enter') save();
@@ -17,6 +18,8 @@
   }
 
   function save() {
+    if (committed) return;
+    committed = true;
     if (dtype.toLowerCase().includes('int') || dtype.toLowerCase().includes('float')) {
       const num = inputValue === '' ? null : Number(inputValue);
       onSave(isNaN(num as number) ? null : num);

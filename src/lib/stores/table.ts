@@ -255,6 +255,10 @@ function createTableStore() {
     update(state => ({ ...state, filters: {} }));
   }
 
+  function clearSort() {
+    update(state => ({ ...state, sort: { column: '', direction: null } }));
+  }
+
   // --- Progressive loading for large files ---
 
   async function loadMore() {
@@ -266,9 +270,7 @@ function createTableStore() {
       const page = await getPage(state.rows.length, LOAD_CHUNK);
       update(s => {
         if (page.length === 0) return { ...s, loadingMore: false };
-        const seen = new Set(s.rows.map(r => r.row_id));
-        const fresh = page.filter(r => !seen.has(r.row_id));
-        return { ...s, rows: [...s.rows, ...fresh], loadingMore: false };
+        return { ...s, rows: [...s.rows, ...page], loadingMore: false };
       });
     } catch (err) {
       console.error('Failed to load more rows:', err);
@@ -307,6 +309,7 @@ function createTableStore() {
     toggleFilter,
     setFilter,
     clearFilters,
+    clearSort,
     loadMore,
   };
 }
@@ -317,16 +320,26 @@ export const initialLoadThreshold = INITIAL_LOAD_THRESHOLD;
 
 /** Row ids that have at least one selected cell (or all rows when select-all is active) */
 export const selectedRowIds = derived(tableStore, ($t) => {
-  const s = new Set<number>();
-  if ($t.selection.allRows) {
-    for (const r of $t.rows) s.add(r.row_id);
-  } else {
-    for (const key of $t.selection.cells) {
-      const idx = key.indexOf(':');
-      s.add(Number(key.slice(0, idx)));
+  let memo: { sel: SelectionState; rows: RowData[] | null; out: Set<number> } = {
+    sel: emptySelection(),
+    rows: null,
+    out: new Set(),
+  };
+  return memoizedSelection($t);
+  function memoizedSelection($t: TableState): Set<number> {
+    if (memo.sel === $t.selection && memo.rows === $t.rows) return memo.out;
+    const s = new Set<number>();
+    if ($t.selection.allRows) {
+      for (const r of $t.rows) s.add(r.row_id);
+    } else {
+      for (const key of $t.selection.cells) {
+        const idx = key.indexOf(':');
+        s.add(Number(key.slice(0, idx)));
+      }
     }
+    memo = { sel: $t.selection, rows: $t.rows, out: s };
+    return s;
   }
-  return s;
 });
 
 /** True when the engine's full result set is loaded (no more pages to fetch) */
@@ -348,60 +361,79 @@ export function distinctValues(rows: RowData[], colIdx: number): (string | null)
 }
 
 export const displayedRows = derived(tableStore, ($table) => {
-  let rows = [...$table.rows];
-
-  // Column filters (AND across columns)
-  const filterCols = $table.columns.filter(c => $table.filters[c.name]?.size > 0);
-  if (filterCols.length > 0) {
-    rows = rows.filter(r => {
-      for (const c of filterCols) {
-        const idx = $table.columns.indexOf(c);
-        const v = r.values[idx];
-        const key = v === null || v === undefined ? null : String(v);
-        if (!$table.filters[c.name].has(key)) return false;
-      }
-      return true;
-    });
-  }
-
-  // Global / per-column search
-  if ($table.search.query) {
-    const q = $table.search.query.toLowerCase();
-    if ($table.search.column) {
-      const colIdx = $table.columns.findIndex(c => c.name === $table.search.column);
-      if (colIdx >= 0) {
-        rows = rows.filter(r => {
-          const val = r.values[colIdx];
-          return val !== null && String(val).toLowerCase().includes(q);
-        });
-      }
-    } else {
-      rows = rows.filter(r =>
-        r.values.some(v => v !== null && String(v).toLowerCase().includes(q))
-      );
+  let memo: {
+    columns: ColumnInfo[] | null;
+    rows: RowData[] | null;
+    filters: Record<string, Set<string | null>> | null;
+    search: SearchConfig | null;
+    sort: SortConfig | null;
+    out: RowData[];
+  } = { columns: null, rows: null, filters: null, search: null, sort: null, out: [] };
+  return compute($table);
+  function compute($table: TableState): RowData[] {
+    const { columns, rows, filters, search, sort } = $table;
+    if (memo.columns === columns && memo.rows === rows && memo.filters === filters && memo.search === search && memo.sort === sort) {
+      return memo.out;
     }
-  }
+    const colIdxOf = new Map(columns.map((c, i) => [c.name, i] as const));
 
-  if ($table.sort.direction && $table.sort.column) {
-    const colIdx = $table.columns.findIndex(c => c.name === $table.sort.column);
-    if (colIdx >= 0) {
-      rows.sort((a, b) => {
-        const va = a.values[colIdx];
-        const vb = b.values[colIdx];
-        if (va === null && vb === null) return 0;
-        if (va === null) return 1;
-        if (vb === null) return -1;
-        if (typeof va === 'number' && typeof vb === 'number') {
-          return $table.sort.direction === 'asc' ? va - vb : vb - va;
+    let out = rows;
+
+    // Column filters (AND across columns)
+    const filterCols = columns.filter(c => filters[c.name]?.size > 0);
+    if (filterCols.length > 0) {
+      const filterDefs = filterCols.map(c => ({ idx: colIdxOf.get(c.name) ?? -1, set: filters[c.name]! }));
+      out = out.filter(r => {
+        for (const f of filterDefs) {
+          const v = r.values[f.idx];
+          const key = v === null || v === undefined ? null : String(v);
+          if (!f.set.has(key)) return false;
         }
-        const sa = String(va).toLowerCase();
-        const sb = String(vb).toLowerCase();
-        if (sa < sb) return $table.sort.direction === 'asc' ? -1 : 1;
-        if (sa > sb) return $table.sort.direction === 'asc' ? 1 : -1;
-        return 0;
+        return true;
       });
     }
-  }
 
-  return rows;
+    // Global / per-column search
+    if (search.query) {
+      const q = search.query.toLowerCase();
+      if (search.column) {
+        const colIdx = colIdxOf.get(search.column) ?? -1;
+        if (colIdx >= 0) {
+          out = out.filter(r => {
+            const val = r.values[colIdx];
+            return val !== null && String(val).toLowerCase().includes(q);
+          });
+        }
+      } else {
+        out = out.filter(r =>
+          r.values.some(v => v !== null && String(v).toLowerCase().includes(q))
+        );
+      }
+    }
+
+    if (sort.direction && sort.column) {
+      const colIdx = colIdxOf.get(sort.column) ?? -1;
+      if (colIdx >= 0) {
+        const dir = sort.direction;
+        out = [...out].sort((a, b) => {
+          const va = a.values[colIdx];
+          const vb = b.values[colIdx];
+          if (va === null && vb === null) return 0;
+          if (va === null) return 1;
+          if (vb === null) return -1;
+          if (typeof va === 'number' && typeof vb === 'number') {
+            return dir === 'asc' ? va - vb : vb - va;
+          }
+          const sa = String(va).toLowerCase();
+          const sb = String(vb).toLowerCase();
+          if (sa < sb) return dir === 'asc' ? -1 : 1;
+          if (sa > sb) return dir === 'asc' ? 1 : -1;
+          return 0;
+        });
+      }
+    }
+
+    memo = { columns, rows, filters, search, sort, out };
+    return out;
+  }
 });

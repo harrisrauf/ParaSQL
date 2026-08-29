@@ -2,13 +2,13 @@ mod commands;
 mod engine;
 
 use commands::AppState;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState {
-            engine: Mutex::new(None),
+            engine: Arc::new(Mutex::new(None)),
         })
         .invoke_handler(tauri::generate_handler![
             commands::open_file,

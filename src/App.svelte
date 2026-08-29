@@ -76,8 +76,8 @@
       }
       return;
     }
-    // Delete selected rows
-    if (e.key === 'Delete' && selectedIds.size > 0) {
+    // Delete selected rows (grid focus only — not while a button is focused)
+    if (e.key === 'Delete' && tag !== 'button' && selectedIds.size > 0) {
       deleteSelectedFlow();
     }
   }
@@ -89,7 +89,16 @@
     const rowEl = target.closest('.grid-row') as HTMLElement | null;
     const rowId = rowEl ? Number(rowEl.dataset.row) : NaN;
     const row = Number.isNaN(rowId) ? null : $tableStore.rows.find(r => r.row_id === rowId) ?? null;
-    contextMenu = { show: true, x: e.clientX, y: e.clientY, value: cellValue, colName, row };
+    const menuW = 220;
+    const menuH = 130;
+    contextMenu = {
+      show: true,
+      x: Math.min(e.clientX, window.innerWidth - menuW),
+      y: Math.min(e.clientY, window.innerHeight - menuH),
+      value: cellValue,
+      colName,
+      row,
+    };
   }
 
   function closeContextMenu() {
