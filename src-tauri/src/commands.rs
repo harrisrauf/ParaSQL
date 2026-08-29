@@ -209,3 +209,8 @@ pub fn export_excel(path: String, state: State<AppState>) -> Result<(), String> 
     let engine = eng.as_mut().ok_or_else(|| "No file open".to_string())?;
     engine.export_excel(&path)
 }
+
+#[tauri::command]
+pub fn debug_log(msg: String) {
+    println!("[webview] {}", msg);
+}
