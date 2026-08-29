@@ -98,3 +98,9 @@ body {
 :root.dark .cm-selectionBackground {
   background-color: #264f78 !important;
 }
+
+/* Grid density */
+:global(.grid.compact) .grid-row,
+:global(.grid.compact) .col-header {
+  font-size: 12px;
+}

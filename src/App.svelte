@@ -1,20 +1,36 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import MenuBar from './lib/components/MenuBar.svelte';
   import Toolbar from './lib/components/Toolbar.svelte';
-  import DataTable from './lib/components/DataTable.svelte';
-  import RightSidebar from './lib/components/RightSidebar.svelte';
+  import DataGrid from './lib/components/DataGrid.svelte';
+  import LeftPanel from './lib/components/LeftPanel.svelte';
   import StatusBar from './lib/components/StatusBar.svelte';
-  import { tableStore } from './lib/stores/table';
-  import { deleteRows, undo, redo } from './lib/commands';
+  import { tableStore, selectedRowIds } from './lib/stores/table';
+  import { uiStore } from './lib/stores/ui';
+  import { settings } from './lib/stores/settings';
   import { getCurrentWindow } from '@tauri-apps/api/window';
+  import {
+    openFileFlow,
+    openFolderFlow,
+    saveFlow,
+    undoFlow,
+    redoFlow,
+    deleteSelectedFlow,
+    copySelectionToClipboard,
+    copyValue,
+    copyAsWhere,
+    copyRowAsJson,
+  } from './lib/actions';
+  import type { RowData } from './lib/types';
 
   let hasData = $derived($tableStore.columns.length > 0);
-  let selectedIds = $derived($tableStore.selectedRowIds);
+  let selectedIds = $derived(selectedRowIds);
+  let sidebarVisible = $derived($uiStore.sidebarVisible);
 
   // Context menu state
-  let contextMenu = $state<{ show: boolean; x: number; y: number; value: string; colName: string }>({
-    show: false, x: 0, y: 0, value: '', colName: ''
-  });
+  let contextMenu = $state<{
+    show: boolean; x: number; y: number; value: string; colName: string; row: RowData | null;
+  }>({ show: false, x: 0, y: 0, value: '', colName: '', row: null });
 
   function handleKeydown(e: KeyboardEvent) {
     // Don't hijack shortcuts while typing in inputs, editors, or selects
@@ -26,56 +42,43 @@
     ) {
       return;
     }
+    const mod = e.ctrlKey || e.metaKey;
     // Undo: Ctrl+Z
-    if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+    if (mod && e.key === 'z' && !e.shiftKey) {
       e.preventDefault();
-      handleUndo();
+      undoFlow();
       return;
     }
     // Redo: Ctrl+Y or Ctrl+Shift+Z
-    if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
+    if (mod && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
       e.preventDefault();
-      handleRedo();
+      redoFlow();
+      return;
+    }
+    // Save: Ctrl+S
+    if (mod && e.key === 's') {
+      e.preventDefault();
+      saveFlow();
+      return;
+    }
+    // Copy: Ctrl+C (with grid focus)
+    if (mod && e.key === 'c') {
+      if (selectedIds.size > 0 || $tableStore.selection.allRows) {
+        copySelectionToClipboard();
+      }
+      return;
+    }
+    // Select all: Ctrl+A
+    if (mod && e.key === 'a') {
+      if ($tableStore.columns.length > 0) {
+        e.preventDefault();
+        tableStore.selectAll();
+      }
       return;
     }
     // Delete selected rows
     if (e.key === 'Delete' && selectedIds.size > 0) {
-      handleDeleteSelected();
-    }
-  }
-
-  async function handleDeleteSelected() {
-    if (selectedIds.size === 0) return;
-    if (!confirm(`Delete ${selectedIds.size} row(s)?`)) return;
-    try {
-      await deleteRows([...selectedIds]);
-      tableStore.removeRows([...selectedIds]);
-      tableStore.update(s => ({ ...s, modified: true }));
-      tableStore.clearSelection();
-    } catch (err) {
-      console.error('Failed to delete rows:', err);
-    }
-  }
-
-  async function handleUndo() {
-    try {
-      await undo();
-      const mod = await import('./lib/commands');
-      const [rows, columns] = await Promise.all([mod.getAllRows(), mod.getColumns()]);
-      tableStore.update(s => ({ ...s, rows, columns, sqlResult: null, savedTable: null }));
-    } catch (err) {
-      console.error('Failed to undo:', err);
-    }
-  }
-
-  async function handleRedo() {
-    try {
-      await redo();
-      const mod = await import('./lib/commands');
-      const [rows, columns] = await Promise.all([mod.getAllRows(), mod.getColumns()]);
-      tableStore.update(s => ({ ...s, rows, columns, sqlResult: null, savedTable: null }));
-    } catch (err) {
-      console.error('Failed to redo:', err);
+      deleteSelectedFlow();
     }
   }
 
@@ -83,33 +86,30 @@
     const target = e.target as HTMLElement;
     const cellValue = target.closest('.cell-value')?.textContent || '';
     const colName = target.closest('.cell')?.getAttribute('data-col') || '';
-    contextMenu = { show: true, x: e.clientX, y: e.clientY, value: cellValue, colName };
+    const rowEl = target.closest('.grid-row') as HTMLElement | null;
+    const rowId = rowEl ? Number(rowEl.dataset.row) : NaN;
+    const row = Number.isNaN(rowId) ? null : $tableStore.rows.find(r => r.row_id === rowId) ?? null;
+    contextMenu = { show: true, x: e.clientX, y: e.clientY, value: cellValue, colName, row };
   }
 
   function closeContextMenu() {
     contextMenu.show = false;
   }
 
-  async function copyAsWhere() {
+  async function handleCopyValue() {
+    if (contextMenu.value) await copyValue(contextMenu.value);
+    closeContextMenu();
+  }
+
+  async function handleCopyAsWhere() {
     if (contextMenu.colName && contextMenu.value) {
-      const whereClause = `${contextMenu.colName} = '${contextMenu.value}'`;
-      try {
-        await navigator.clipboard.writeText(whereClause);
-      } catch (e) {
-        console.error('Failed to copy:', e);
-      }
+      await copyAsWhere(contextMenu.colName, contextMenu.value);
     }
     closeContextMenu();
   }
 
-  async function copyValue() {
-    if (contextMenu.value) {
-      try {
-        await navigator.clipboard.writeText(contextMenu.value);
-      } catch (e) {
-        console.error('Failed to copy:', e);
-      }
-    }
+  async function handleCopyRowJson() {
+    if (contextMenu.row) await copyRowAsJson(contextMenu.row);
     closeContextMenu();
   }
 
@@ -140,91 +140,53 @@
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="app" oncontextmenu={handleContextMenu}>
+  <MenuBar />
   <Toolbar />
   <div class="main-content">
     {#if hasData}
-      <DataTable />
-      <RightSidebar />
+      {#if sidebarVisible}
+        <LeftPanel />
+      {/if}
+      <DataGrid />
     {:else}
       <div class="welcome">
         <h1>Parquet Viewer</h1>
         <p>Open a .parquet file to get started.</p>
         <p class="subtitle">Powered by DuckDB — Full SQL support for Parquet files</p>
         <div class="welcome-actions">
-          <button
-            onclick={async () => {
-              const { open } = await import('@tauri-apps/plugin-dialog');
-              const selected = await open({
-                multiple: false,
-                filters: [{ name: 'Parquet', extensions: ['parquet'] }],
-              });
-              if (!selected) return;
-              const { openFile, getAllRows } = await import('./lib/commands');
-              const meta = await openFile(selected);
-              const rows = await getAllRows();
-              tableStore.set({
-                columns: meta.columns,
-                rows,
-                selectedRowIds: new Set(),
-                sort: { column: '', direction: null },
-                search: { query: '', column: null },
-                modified: false,
-                filePath: meta.file_path,
-                totalRows: meta.total_rows,
-                pageSize: 500,
-                currentPage: 0,
-                sqlResult: null,
-                savedTable: null,
-                activeTab: 'schema',
-              });
-            }}
-            class="open-btn"
-          >
-            Open File
-          </button>
-          <button
-            onclick={async () => {
-              const { open } = await import('@tauri-apps/plugin-dialog');
-              const selected = await open({ directory: true, multiple: false });
-              if (!selected) return;
-              const { openFolder, getAllRows } = await import('./lib/commands');
-              const meta = await openFolder(selected);
-              const rows = await getAllRows();
-              tableStore.set({
-                columns: meta.columns,
-                rows,
-                selectedRowIds: new Set(),
-                sort: { column: '', direction: null },
-                search: { query: '', column: null },
-                modified: false,
-                filePath: meta.file_path,
-                totalRows: meta.total_rows,
-                pageSize: 500,
-                currentPage: 0,
-                sqlResult: null,
-                savedTable: null,
-                activeTab: 'schema',
-              });
-            }}
-            class="open-btn secondary"
-          >
-            Open Folder
-          </button>
+          <button onclick={() => openFileFlow()} class="open-btn">Open File</button>
+          <button onclick={() => openFolderFlow()} class="open-btn secondary">Open Folder</button>
         </div>
+        {#if settings.recentFiles.length > 0}
+          <div class="welcome-recent">
+            <span class="recent-label">Recent files:</span>
+            {#each settings.recentFiles.slice(0, 5) as path (path)}
+              <button class="recent-btn" onclick={() => openFileFlow(path)}>
+                {path.split(/[\\/]/).pop()}
+              </button>
+            {/each}
+          </div>
+        {/if}
       </div>
     {/if}
   </div>
   <StatusBar />
 
   {#if contextMenu.show}
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <!-- svelte-ignore a11y_no_static_element_interactions, a11y_click_events_have_key_events -->
     <div
       class="context-menu"
+      role="menu"
+      aria-label="Context menu"
+      tabindex="-1"
       style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
       onclick={(e) => e.stopPropagation()}
     >
-      <button onclick={copyValue}>Copy value</button>
-      <button onclick={copyAsWhere}>Copy as WHERE clause</button>
+      <button onclick={handleCopyValue}>Copy value</button>
+      <button onclick={handleCopyAsWhere}>Copy as WHERE clause</button>
+      {#if contextMenu.row}
+        <button onclick={handleCopyRowJson}>Copy row as JSON</button>
+      {/if}
     </div>
   {/if}
 </div>
@@ -243,6 +205,7 @@
     display: flex;
     flex: 1;
     overflow: hidden;
+    min-height: 0;
   }
 
   .welcome {
@@ -302,6 +265,39 @@
 
   .open-btn.secondary:hover {
     background: var(--hover-bg, #f0f0f0);
+  }
+
+  .welcome-recent {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    margin-top: 20px;
+  }
+
+  .recent-label {
+    font-size: 11px;
+    color: var(--text-secondary, #aaa);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .recent-btn {
+    border: none;
+    background: none;
+    color: var(--accent-color, #1a73e8);
+    cursor: pointer;
+    font-size: 13px;
+    font-family: inherit;
+    padding: 2px 8px;
+    max-width: 320px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .recent-btn:hover {
+    text-decoration: underline;
   }
 
   .context-menu {

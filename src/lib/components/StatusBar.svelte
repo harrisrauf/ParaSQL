@@ -1,62 +1,93 @@
 <script lang="ts">
-  import { tableStore } from '../stores/table';
+  import { tableStore, displayedRows, selectedRowIds } from '../stores/table';
 
-  let columns = $derived($tableStore.columns);
   let rows = $derived($tableStore.rows);
+  let columns = $derived($tableStore.columns);
+  let totalRows = $derived($tableStore.totalRows);
   let modified = $derived($tableStore.modified);
   let filePath = $derived($tableStore.filePath);
-  let totalRows = $derived($tableStore.totalRows);
   let sort = $derived($tableStore.sort);
+  let filters = $derived($tableStore.filters);
+  let search = $derived($tableStore.search);
+  let visibleRows = $derived($displayedRows);
+  let selected = $derived($selectedRowIds);
+  let sqlResult = $derived($tableStore.sqlResult);
 
-  let fileName = $derived(
-    filePath ? filePath.split(/[/\\]/).pop() : 'Untitled'
-  );
-  let sortInfo = $derived(
-    sort.direction ? `Sorted by: ${sort.column} (${sort.direction})` : ''
+  let fileName = $derived(filePath ? filePath.split(/[\\/]/).pop() : '');
+  let filtered = $derived(
+    Object.keys(filters).some(k => (filters[k]?.size ?? 0) > 0) || (search.query.length > 0)
   );
 </script>
 
-<footer class="status-bar">
+<div class="statusbar">
   <span class="status-item">
-    {rows.length.toLocaleString()} of {totalRows.toLocaleString()} rows
+    {visibleRows.length.toLocaleString()} of {totalRows.toLocaleString()} rows
+    {#if filtered}
+      <span class="filtered-badge">filtered</span>
+    {/if}
   </span>
   <span class="status-item">{columns.length} cols</span>
-  {#if sortInfo}
-    <span class="status-item">{sortInfo}</span>
+  {#if selected.size > 0}
+    <span class="status-item selected">{selected.size.toLocaleString()} selected</span>
+  {/if}
+  {#if sort.column}
+    <span class="status-item">
+      sorted: {sort.column} {sort.direction === 'asc' ? '↑' : '↓'}
+    </span>
+  {/if}
+  {#if sqlResult}
+    <span class="status-item query-badge">query results</span>
   {/if}
   <span class="status-spacer"></span>
-  <span class="status-item" class:modified={modified}>
+  {#if fileName}
+    <span class="status-item filename" title={filePath ?? ''}>{fileName}</span>
+  {/if}
+  <span class="status-item" class:modified={modified} title={modified ? 'Unsaved changes' : 'Saved'}>
     {modified ? '● Modified' : '○ Saved'}
   </span>
-  <span class="status-item file-name">{fileName}</span>
-</footer>
+</div>
 
 <style>
-  .status-bar {
+  .statusbar {
     display: flex;
     align-items: center;
-    padding: 4px 12px;
+    gap: 12px;
+    padding: 3px 10px;
+    background: var(--panel-bg, #fafafa);
     border-top: 1px solid var(--border-color, #e0e0e0);
-    background: var(--toolbar-bg, #fafafa);
-    font-size: 12px;
+    font-size: 11px;
     color: var(--text-secondary, #888);
-    gap: 16px;
+    flex-shrink: 0;
+    user-select: none;
+    white-space: nowrap;
   }
 
-  .status-item {
-    white-space: nowrap;
+  .status-item.selected {
+    color: var(--accent-color, #1a73e8);
+    font-weight: 600;
+  }
+
+  .status-item.modified {
+    color: #e67e22;
+  }
+
+  .filtered-badge,
+  .query-badge {
+    margin-left: 4px;
+    padding: 0 6px;
+    border-radius: 8px;
+    font-size: 10px;
+    background: var(--selected-bg, #e8f0fe);
+    color: var(--accent-color, #1a73e8);
   }
 
   .status-spacer {
     flex: 1;
   }
 
-  .modified {
-    color: #e67e22;
-  }
-
-  .file-name {
-    color: var(--text-primary, #555);
-    font-weight: 500;
+  .filename {
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 </style>

@@ -431,14 +431,14 @@ impl DuckDbEngine {
         Ok(())
     }
 
-    /// Get DuckDB schema as CREATE TABLE statement
-    pub fn generate_schema_sql(&self) -> Result<String, String> {
+    /// Get schema as CREATE TABLE statement in the requested SQL dialect
+    pub fn generate_schema_sql(&self, dialect: &str) -> Result<String, String> {
         let columns = self.column_info()?;
         let col_defs: Vec<String> = columns
             .iter()
             .map(|c| {
                 let nullable = if c.nullable { "" } else { " NOT NULL" };
-                format!("  \"{}\" {}{}", c.name, c.dtype.to_uppercase(), nullable)
+                format!("  \"{}\" {}{}", c.name, map_type(&c.dtype, dialect), nullable)
             })
             .collect();
 
@@ -638,6 +638,48 @@ impl DuckDbEngine {
 }
 
 // --- Arrow to JSON conversion (supports nested types) ---
+
+/// Map a DuckDB column type to the requested SQL dialect
+fn map_type(dtype: &str, dialect: &str) -> String {
+    let t = dtype.to_uppercase();
+    let base = match t.as_str() {
+        "BIGINT" | "INT64" => "BIGINT",
+        "INTEGER" | "INT32" | "INT" => "INTEGER",
+        "DOUBLE" | "FLOAT64" => "DOUBLE",
+        "FLOAT" | "FLOAT32" | "REAL" => "FLOAT",
+        "BOOLEAN" | "BOOL" => "BOOLEAN",
+        "DATE" => "DATE",
+        "TIMESTAMP" | "DATETIME" => "TIMESTAMP",
+        _ => "VARCHAR",
+    };
+    match dialect {
+        "postgres" => match base {
+            "FLOAT" => "REAL",
+            "DOUBLE" => "DOUBLE PRECISION",
+            "TIMESTAMP" => "TIMESTAMP",
+            _ => base,
+        },
+        "mysql" => match base {
+            "VARCHAR" => "VARCHAR(255)",
+            "INTEGER" => "INT",
+            "DOUBLE" => "DOUBLE",
+            "FLOAT" => "FLOAT",
+            "TIMESTAMP" => "DATETIME",
+            _ => base,
+        },
+        "sqlite" => match base {
+            "BIGINT" | "INTEGER" | "FLOAT" | "DOUBLE" => match base {
+                "BIGINT" | "INTEGER" => "INTEGER",
+                _ => "REAL",
+            },
+            "BOOLEAN" => "INTEGER",
+            "TIMESTAMP" => "DATETIME",
+            _ => "TEXT",
+        },
+        _ => base,
+    }
+    .to_string()
+}
 
 pub fn rows_from_batch(batch: &RecordBatch, offset: usize) -> Result<Vec<RowData>, String> {
     let schema = batch.schema();
