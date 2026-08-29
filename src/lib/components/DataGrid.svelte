@@ -1,6 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { createVirtualizer, type Virtualizer } from '@tanstack/svelte-virtual';
+  import { createVirtualizer } from '@tanstack/svelte-virtual';
   import CellEditor from './CellEditor.svelte';
   import FilterPopover from './FilterPopover.svelte';
   import { tableStore, displayedRows, selectedRowIds, allLoaded } from '../stores/table';
@@ -14,7 +13,6 @@
 
   let scrollEl: HTMLElement | null = $state(null);
   let containerEl: HTMLElement | null = $state(null);
-  let vizer: Virtualizer<HTMLElement, Element> | null = $state(null);
   let editingCell: { rowId: number; colIdx: number } | null = $state(null);
   let filterAnchor: { colName: string; x: number; y: number } | null = $state(null);
 
@@ -38,24 +36,21 @@
     columns.reduce((acc, c) => acc + (effectiveWidths[c.name] ?? 120), 0) + ROW_ID_W
   );
 
-  onMount(() => {
-    vizer = createVirtualizer({
-      count: rows.length,
-      getScrollElement: () => scrollEl,
-      estimateSize: () => rowHeight,
-      overscan: 20,
-    });
+  // Created once — never recreated — so scroll position survives store updates
+  const vizerStore = createVirtualizer({
+    count: 0,
+    getScrollElement: () => scrollEl,
+    estimateSize: () => rowHeight,
+    overscan: 20,
   });
 
-  let virtualItems = $derived(vizer ? $vizer.getVirtualItems() : []);
-  let totalSize = $derived(vizer ? $vizer.getTotalSize() : 0);
+  let virtualItems = $derived($vizerStore.getVirtualItems());
+  let totalSize = $derived($vizerStore.getTotalSize());
 
   // Keep the virtualizer's options in sync without recreating it
   $effect(() => {
-    if (vizer) {
-      vizer.setOptions({ count: rows.length, estimateSize: () => rowHeight, overscan: 20 });
-      vizer.measure();
-    }
+    $vizerStore.setOptions({ count: rows.length, estimateSize: () => rowHeight, overscan: 20 });
+    $vizerStore.measure();
   });
 
   // Progressive loading for large files: fetch the next page when the user
@@ -65,7 +60,7 @@
     const items = virtualItems;
     const last = items[items.length - 1];
     if (last && last.index >= $tableStore.rows.length - 20) {
-      $tableStore.loadMore();
+      tableStore.loadMore();
     }
   });
 
@@ -234,7 +229,7 @@
       tableStore.setRange(rows[rowIdx].row_id, colIdx, target.row_id, nc, rows.map(r => r.row_id), columns.length);
     } else {
       tableStore.selectCell(target.row_id, nc);
-      vizer?.scrollToIndex(nr, { align: 'auto' });
+      $vizerStore.scrollToIndex(nr, { align: 'auto' });
     }
   }
 

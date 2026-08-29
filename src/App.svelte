@@ -24,7 +24,7 @@
   import type { RowData } from './lib/types';
 
   let hasData = $derived($tableStore.columns.length > 0);
-  let selectedIds = $derived(selectedRowIds);
+  let selectedIds = $derived($selectedRowIds);
   let sidebarVisible = $derived($uiStore.sidebarVisible);
 
   // Context menu state
@@ -157,10 +157,10 @@
           <button onclick={() => openFileFlow()} class="open-btn">Open File</button>
           <button onclick={() => openFolderFlow()} class="open-btn secondary">Open Folder</button>
         </div>
-        {#if settings.recentFiles.length > 0}
+        {#if $settings.recentFiles.length > 0}
           <div class="welcome-recent">
             <span class="recent-label">Recent files:</span>
-            {#each settings.recentFiles.slice(0, 5) as path (path)}
+            {#each $settings.recentFiles.slice(0, 5) as path (path)}
               <button class="recent-btn" onclick={() => openFileFlow(path)}>
                 {path.split(/[\\/]/).pop()}
               </button>
