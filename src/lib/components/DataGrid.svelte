@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { createVirtualizer } from '@tanstack/svelte-virtual';
+  import { onMount } from 'svelte';
+  import { get } from 'svelte/store';
+  import { createVirtualizer, type SvelteVirtualizer } from '@tanstack/svelte-virtual';
   import CellEditor from './CellEditor.svelte';
   import FilterPopover from './FilterPopover.svelte';
   import { tableStore, displayedRows, selectedRowIds, allLoaded } from '../stores/table';
@@ -44,13 +46,26 @@
     overscan: 20,
   });
 
+  // Raw instance captured once. IMPORTANT: we must NOT call setOptions via
+  // `$vizerStore` from inside an $effect — the svelte-virtual wrapper's
+  // setOptions always fires virtualizerWritable.set(), and an $effect reading
+  // `$vizerStore` subscribes to that store, producing an infinite
+  // effect_update_depth_exceeded loop that kills the whole UI.
+  let rawVizer: SvelteVirtualizer<HTMLElement, Element> | undefined;
+  let vizerReady = $state(false);
+  onMount(() => {
+    rawVizer = get(vizerStore);
+    vizerReady = true;
+  });
+
   let virtualItems = $derived($vizerStore.getVirtualItems());
   let totalSize = $derived($vizerStore.getTotalSize());
 
   // Keep the virtualizer's options in sync without recreating it
   $effect(() => {
-    $vizerStore.setOptions({ count: rows.length, estimateSize: () => rowHeight, overscan: 20 });
-    $vizerStore.measure();
+    if (!vizerReady || !rawVizer) return;
+    rawVizer.setOptions({ count: rows.length, estimateSize: () => rowHeight, overscan: 20 });
+    rawVizer.measure();
   });
 
   // Progressive loading for large files: fetch the next page when the user
