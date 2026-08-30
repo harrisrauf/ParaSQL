@@ -44,6 +44,7 @@ pub fn run() {
             commands::get_table_meta,
             commands::export_table,
             commands::summarize_table,
+            commands::list_parquet_files,
             commands::debug_log,
         ])
         .run(tauri::generate_context!())

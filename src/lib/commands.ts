@@ -1,5 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { ColumnInfo, RowData, QueryResult, MetadataJson, SearchResult } from './types';
+import type {
+  ColumnInfo, RowData, QueryResult, MetadataJson, SearchResult,
+  Workspace, TableMeta, TableSummary,
+} from './types';
 
 export async function openFile(path: string): Promise<MetadataJson> {
   return invoke('open_file', { path });
@@ -111,4 +114,47 @@ export async function exportCsv(path: string): Promise<void> {
 
 export async function exportExcel(path: string): Promise<void> {
   return invoke('export_excel', { path });
+}
+
+// --- Workspace commands ---
+
+export function openWorkspace(path: string): Promise<Workspace> {
+  return invoke('open_workspace', { path });
+}
+
+export function saveWorkspace(path: string, ws: Workspace): Promise<void> {
+  return invoke('save_workspace', { path, ws });
+}
+
+export function syncWorkspaceTables(path: string, ws: Workspace): Promise<Workspace> {
+  return invoke('sync_workspace_tables', { path, ws });
+}
+
+export function openTableForEdit(
+  name: string,
+  path: string,
+  force: boolean,
+  ws: Workspace
+): Promise<{ opened: boolean; over_limit?: boolean; size_mb?: number }> {
+  return invoke('open_table_for_edit', { name, path, force, ws });
+}
+
+export function closeEditor(): Promise<void> {
+  return invoke('close_editor');
+}
+
+export function getTableMeta(path: string): Promise<TableMeta> {
+  return invoke('get_table_meta', { path });
+}
+
+export function exportTable(name: string, outPath: string, compression: string): Promise<void> {
+  return invoke('export_table', { name, outPath, compression });
+}
+
+export function summarizeTable(name: string): Promise<TableSummary> {
+  return invoke('summarize_table', { name });
+}
+
+export function listParquetFiles(dir: string): Promise<string[]> {
+  return invoke('list_parquet_files', { dir });
 }

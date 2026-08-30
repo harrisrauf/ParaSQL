@@ -15,7 +15,15 @@
     deleteSelectedFlow,
     insertRowFlow,
     copySelectionToClipboard,
+    newWorkspaceFlow,
+    openWorkspaceFlow,
+    saveWorkspaceFlow,
+    saveWorkspaceAsFlow,
+    addTableFlow,
+    addFolderFlow,
+    closeEditorFlow,
   } from '../actions';
+  import { workspaceStore } from '../stores/workspace';
 
   interface SubItem {
     label: string;
@@ -50,6 +58,9 @@
   let density = $derived($settings.rowDensity);
   let sidebarVisible = $derived($uiStore.sidebarVisible);
   let recentFiles = $derived($settings.recentFiles);
+  let wsDoc = $derived($workspaceStore.doc);
+  let wsEditorOpen = $derived($workspaceStore.editorOpen);
+  let editable = $derived($tableStore.editable);
 
   async function refreshEditState() {
     const [u, r] = await Promise.all([canUndo(), canRedo()]);
@@ -102,6 +113,22 @@
       ],
     },
     {
+      id: 'workspace',
+      label: 'Workspace',
+      items: [
+        { label: 'New Workspace…', action: () => newWorkspaceFlow() },
+        { label: 'Open Workspace…', action: () => openWorkspaceFlow() },
+        { separator: true },
+        { label: 'Save Workspace', action: () => saveWorkspaceFlow(), disabled: !wsDoc },
+        { label: 'Save Workspace As…', action: () => saveWorkspaceAsFlow(), disabled: !wsDoc },
+        { separator: true },
+        { label: 'Add Table…', action: () => addTableFlow(), disabled: !wsDoc },
+        { label: 'Add Folder…', action: () => addFolderFlow(), disabled: !wsDoc },
+        { separator: true },
+        { label: 'Close Editor', action: () => closeEditorFlow(), disabled: !wsEditorOpen },
+      ],
+    },
+    {
       id: 'edit',
       label: 'Edit',
       items: [
@@ -110,9 +137,9 @@
         { separator: true },
         { label: 'Copy', action: () => copySelectionToClipboard(), disabled: selectedCount === 0 },
         { label: 'Select All', action: selectAll, disabled: !hasData },
-        { label: 'Delete Selected Rows', action: () => deleteSelectedFlow(), disabled: selectedCount === 0 },
+        { label: 'Delete Selected Rows', action: () => deleteSelectedFlow(), disabled: selectedCount === 0 || !editable },
         { separator: true },
-        { label: 'Insert Row', action: () => insertRowFlow(), disabled: !hasData },
+        { label: 'Insert Row', action: () => insertRowFlow(), disabled: !hasData || !editable },
       ],
     },
     {

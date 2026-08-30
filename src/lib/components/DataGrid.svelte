@@ -177,6 +177,7 @@
   // --- Editing ---
 
   function handleEdit(row: RowData, colIdx: number) {
+    if (!$tableStore.editable) return;
     editingCell = { rowId: row.row_id, colIdx };
   }
 
@@ -239,7 +240,7 @@
       case 'PageUp': nr = Math.max(0, rowIdx - 30); break;
       case 'Enter':
       case 'F2':
-        if (rows[rowIdx] && columns[colIdx]) {
+        if (rows[rowIdx] && columns[colIdx] && $tableStore.editable) {
           editingCell = { rowId: rows[rowIdx].row_id, colIdx };
           e.preventDefault();
         }
@@ -298,6 +299,9 @@
 </script>
 
 <div class="grid" class:compact={density === 'compact'} bind:this={containerEl} tabindex="0" role="grid" aria-label="Data grid" onkeydown={handleKeydown}>
+  {#if !$tableStore.editable && columns.length > 0}
+    <div class="readonly-badge" title="Query results are read-only. Open a table for editing to modify rows.">read-only</div>
+  {/if}
   <div class="grid-scroll" bind:this={scrollEl}>
     <div class="grid-inner" style="width: {gridWidth}px; min-width: 100%;">
       <div class="grid-header">
@@ -431,6 +435,21 @@
     flex: 1;
     min-height: 0;
     overflow: auto;
+  }
+
+  .readonly-badge {
+    position: absolute;
+    top: 34px;
+    right: 10px;
+    z-index: 5;
+    padding: 2px 8px;
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--text-secondary);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    pointer-events: none;
   }
 
   .grid-inner {

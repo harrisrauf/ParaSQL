@@ -31,6 +31,8 @@ interface TableState {
   searchRows: RowData[] | null;
   searchTruncated: boolean;
   focusRowId: number | null;
+  /** Whether the current result set is backed by an editable table (D2) */
+  editable: boolean;
 }
 
 function emptySelection(): SelectionState {
@@ -58,6 +60,7 @@ function createTableStore() {
     searchRows: null,
     searchTruncated: false,
     focusRowId: null,
+    editable: true,
   });
 
   function toggleSort(column: string) {
@@ -100,6 +103,7 @@ function createTableStore() {
         sqlResult: result,
         filters: {},
         selection: emptySelection(),
+        editable: false,
       };
     });
   }
@@ -116,6 +120,7 @@ function createTableStore() {
         sqlResult: null,
         filters: {},
         selection: emptySelection(),
+        editable: true,
       };
     });
   }
@@ -154,6 +159,7 @@ function createTableStore() {
       searchRows: null,
       searchTruncated: false,
       focusRowId: null,
+      editable: true,
     });
   }
 
