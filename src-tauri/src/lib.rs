@@ -18,6 +18,7 @@ pub fn run() {
             commands::get_file_info,
             commands::get_all_rows,
             commands::get_page,
+            commands::search_rows,
             commands::get_columns,
             commands::edit_cell,
             commands::delete_rows,

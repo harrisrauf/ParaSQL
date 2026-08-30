@@ -168,9 +168,30 @@ export async function insertRowFlow(): Promise<void> {
         totalRows: s.totalRows + 1,
         modified: true,
       }));
+      tableStore.focusRow(row.row_id);
     }
   } catch (err) {
     console.error('Failed to insert row:', err);
+  }
+}
+
+/** Whole-table search via the engine (matches unloaded rows too) */
+export async function searchFlow(query: string, column: string | null = null): Promise<void> {
+  const q = query.trim();
+  if (!q) {
+    tableStore.setSearch('', null);
+    return;
+  }
+  try {
+    const result = await cmds.searchRows(q, column);
+    tableStore.setSearch(q, column);
+    tableStore.update(s => ({
+      ...s,
+      searchRows: result.rows,
+      searchTruncated: result.truncated,
+    }));
+  } catch (err) {
+    console.error('Search failed:', err);
   }
 }
 

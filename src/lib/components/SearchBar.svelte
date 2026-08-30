@@ -1,23 +1,32 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
-  import { tableStore } from '../stores/table';
+  import { searchFlow } from '../actions';
 
   let query = $state('');
   let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+  let searchSeq = 0;
 
   function handleInput(e: Event) {
     const target = e.target as HTMLInputElement;
     query = target.value;
     clearTimeout(debounceTimer);
+    const seq = ++searchSeq;
     debounceTimer = setTimeout(() => {
-      tableStore.setSearch(query, null);
+      searchFlow(query).then(() => {
+        // If the query changed while the search was in flight, re-run
+        if (seq !== searchSeq) {
+          clearTimeout(debounceTimer);
+          searchFlow(query);
+        }
+      });
     }, 200);
   }
 
   function handleClear() {
     clearTimeout(debounceTimer);
+    searchSeq++;
     query = '';
-    tableStore.setSearch('', null);
+    searchFlow('');
   }
 
   onDestroy(() => clearTimeout(debounceTimer));
