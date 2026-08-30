@@ -5,6 +5,7 @@ use duckdb::types::ToSql;
 use duckdb::Connection;
 use serde_json::Value as JsonValue;
 
+use super::catalog;
 use super::types::*;
 
 // --- DuckDB Engine ---
@@ -16,6 +17,8 @@ pub struct DuckDbEngine {
     file_metadata: Option<FileMetadata>,
     undo_stack: Vec<UndoEntry>,
     redo_stack: Vec<UndoEntry>,
+    /// Workspace view names we created (for safe teardown)
+    created_views: Vec<String>,
 }
 
 /// Max undo steps kept in memory. Older entries are evicted (with cleanup).
@@ -75,6 +78,7 @@ impl DuckDbEngine {
             }),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            created_views: Vec::new(),
         })
     }
 
@@ -118,6 +122,7 @@ impl DuckDbEngine {
             }),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            created_views: Vec::new(),
         })
     }
 
@@ -849,6 +854,220 @@ impl DuckDbEngine {
     /// Check if redo is available
     pub fn can_redo(&self) -> bool {
         !self.redo_stack.is_empty()
+    }
+
+    // --- Workspace mode (multi-file: each file is a table) ---
+
+    /// Open a workspace: create lazy views for every non-missing table.
+    /// No `working` table exists until a table is opened for editing.
+    pub fn open_workspace(ws: &catalog::Workspace) -> Result<Self, String> {
+        let conn = Connection::open_in_memory()
+            .map_err(|e| format!("Failed to create DuckDB connection: {}", e))?;
+        let mut engine = Self {
+            conn,
+            table_name: String::new(),
+            page_size: 500,
+            file_metadata: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            created_views: Vec::new(),
+        };
+        engine.sync_workspace_tables(ws)?;
+        Ok(engine)
+    }
+
+    /// (Re)create views for every table in the workspace; drop stale ones we
+    /// created earlier.
+    pub fn sync_workspace_tables(&mut self, ws: &catalog::Workspace) -> Result<(), String> {
+        let mut kept = Vec::new();
+        for name in std::mem::take(&mut self.created_views) {
+            if ws.tables.iter().any(|t| t.name == name) {
+                kept.push(name);
+            } else {
+                self.conn
+                    .execute_batch(&format!("DROP VIEW IF EXISTS {}", quote_ident(&name)))
+                    .map_err(|e| format!("Failed to drop view '{}': {}", name, e))?;
+            }
+        }
+        for t in &ws.tables {
+            if t.missing {
+                continue;
+            }
+            let abs = t.abs_path.clone().unwrap_or_else(|| t.path.clone());
+            let escaped = abs.replace('\'', "''");
+            self.conn
+                .execute_batch(&format!(
+                    "CREATE OR REPLACE VIEW {} AS SELECT * FROM read_parquet('{}')",
+                    quote_ident(&t.name),
+                    escaped
+                ))
+                .map_err(|e| format!("Failed to create view '{}': {}", t.name, e))?;
+            if !kept.contains(&t.name) {
+                kept.push(t.name.clone());
+            }
+        }
+        self.created_views = kept;
+        Ok(())
+    }
+
+    /// Whether a table is currently open for editing (the Lite flow on `working`).
+    pub fn has_editor(&self) -> bool {
+        !self.table_name.is_empty()
+    }
+
+    /// Materialize a workspace table into `working` for editing.
+    /// The existing mutation/undo machinery operates on `working`.
+    pub fn open_editor_table(&mut self, name: &str, abs_path: &str) -> Result<(), String> {
+        self.conn
+            .execute_batch("DROP INDEX IF EXISTS idx_working_rowid")
+            .map_err(|e| format!("Failed to reset editor: {}", e))?;
+        self.conn
+            .execute_batch("DROP TABLE IF EXISTS working")
+            .map_err(|e| format!("Failed to reset editor: {}", e))?;
+        self.conn
+            .execute_batch(&format!(
+                "CREATE TABLE working AS SELECT row_number() OVER () AS _row_id, t.* FROM {} t",
+                quote_ident(name)
+            ))
+            .map_err(|e| format!("Failed to open table for editing: {}", e))?;
+        self.conn
+            .execute_batch("CREATE INDEX idx_working_rowid ON working(_row_id)")
+            .map_err(|e| format!("Failed to index _row_id: {}", e))?;
+        self.table_name = "working".to_string();
+        self.file_metadata = Some(FileMetadata {
+            path: Some(std::path::PathBuf::from(abs_path)),
+            compression: CompressionPreset::SNAPPY,
+            row_group_size: 0,
+            data_page_size: None,
+        });
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        Ok(())
+    }
+
+    /// Close the editor table (drop `working`), returning to query-only mode.
+    pub fn close_editor(&mut self) -> Result<(), String> {
+        self.conn
+            .execute_batch("DROP INDEX IF EXISTS idx_working_rowid")
+            .map_err(|e| format!("Failed to close editor: {}", e))?;
+        self.conn
+            .execute_batch("DROP TABLE IF EXISTS working")
+            .map_err(|e| format!("Failed to close editor: {}", e))?;
+        self.table_name.clear();
+        self.file_metadata = None;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        Ok(())
+    }
+
+    /// Metadata for a parquet file (rows, row groups, compression, size) —
+    /// read from the footer, no full scan.
+    pub fn get_table_meta(&self, path: &str) -> Result<serde_json::Value, String> {
+        if !std::path::Path::new(path).exists() {
+            return Err(format!("File not found: {}", path));
+        }
+        let escaped = path.replace('\'', "''");
+        let agg_sql = format!(
+            "SELECT COUNT(*) AS row_groups, SUM(row_group_num_rows) AS rows \
+             FROM (SELECT DISTINCT row_group_id, row_group_num_rows \
+                   FROM parquet_metadata('{}'))",
+            escaped
+        );
+        let (row_groups, rows): (i64, i64) = self
+            .conn
+            .query_row(&agg_sql, [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(|e| format!("Failed to read parquet metadata: {}", e))?;
+        let comp_sql = format!(
+            "SELECT DISTINCT compression FROM parquet_metadata('{}') LIMIT 1",
+            escaped
+        );
+        let compression: String = self
+            .conn
+            .query_row(&comp_sql, [], |r| r.get(0))
+            .unwrap_or_else(|_| "unknown".to_string());
+        let size_bytes = std::fs::metadata(path)
+            .map(|m| m.len() as i64)
+            .unwrap_or(0);
+        Ok(serde_json::json!({
+            "path": path,
+            "rows": rows,
+            "row_groups": row_groups,
+            "compression": compression,
+            "size_bytes": size_bytes,
+        }))
+    }
+
+    /// Export a workspace table to parquet with the requested compression.
+    pub fn export_table(&self, name: &str, out_path: &str, compression: &str) -> Result<(), String> {
+        let comp = match compression.to_uppercase().as_str() {
+            "SNAPPY" => "SNAPPY",
+            "ZSTD" => "ZSTD",
+            "GZIP" => "GZIP",
+            "LZ4" | "LZ4_RAW" => "LZ4_RAW",
+            "BROTLI" => "BROTLI",
+            "NONE" | "UNCOMPRESSED" => "UNCOMPRESSED",
+            other => return Err(format!("Unsupported compression: {}", other)),
+        };
+        let escaped = out_path.replace('\'', "''");
+        let sql = format!(
+            "COPY (SELECT * FROM {}) TO '{}' (FORMAT PARQUET, COMPRESSION {})",
+            quote_ident(name),
+            escaped,
+            comp
+        );
+        self.conn
+            .execute_batch(&sql)
+            .map_err(|e| format!("Failed to export table: {}", e))?;
+        Ok(())
+    }
+
+    /// Schema + SUMMARIZE stats + sample rows for a table (AI/analysis context).
+    pub fn summarize_table(&self, name: &str) -> Result<serde_json::Value, String> {
+        let ident = quote_ident(name);
+
+        let desc = self.query_to_batch(&format!("DESCRIBE {}", ident))?;
+        let desc_rows = rows_from_batch(&desc, 0)?;
+        let columns: Vec<serde_json::Value> = desc_rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "name": r.values.first().cloned().unwrap_or(JsonValue::Null),
+                    "type": r.values.get(1).cloned().unwrap_or(JsonValue::Null),
+                    "null": r.values.get(2).cloned().unwrap_or(JsonValue::Null),
+                })
+            })
+            .collect();
+
+        let sum = self.query_to_batch(&format!("SUMMARIZE {}", ident))?;
+        let names: Vec<String> = sum
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
+        let sum_rows = rows_from_batch(&sum, 0)?;
+        let stats: Vec<serde_json::Value> = sum_rows
+            .iter()
+            .map(|r| {
+                let mut obj = serde_json::Map::new();
+                for (i, n) in names.iter().enumerate() {
+                    if let Some(v) = r.values.get(i) {
+                        obj.insert(n.clone(), v.clone());
+                    }
+                }
+                serde_json::Value::Object(obj)
+            })
+            .collect();
+
+        let sample_batch = self.query_to_batch(&format!("SELECT * FROM {} LIMIT 5", ident))?;
+        let sample = rows_from_batch(&sample_batch, 0)?;
+
+        Ok(serde_json::json!({
+            "table": name,
+            "columns": columns,
+            "stats": stats,
+            "sample": sample,
+        }))
     }
 
     /// Internal: execute SQL and get Arrow RecordBatch.
