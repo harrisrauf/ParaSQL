@@ -295,3 +295,305 @@ export async function copyRowAsJson(row: RowData): Promise<void> {
   });
   await navigator.clipboard.writeText(JSON.stringify(obj, null, 2));
 }
+
+// --- Workspace flows ---
+
+import { workspaceStore } from './stores/workspace';
+import type { Workspace, WorkspaceTable, TableMeta, TableSummary } from './types';
+
+const PARASQL_FILTER = [{ name: 'ParaSQL Workspace', extensions: ['parasql'] }];
+
+function emptyWorkspace(name: string): Workspace {
+  return {
+    version: 1,
+    name,
+    tables: [],
+    saved_queries: [],
+    charts: [],
+    dashboards: [],
+    notebooks: [],
+    edit_size_limit_mb: 2048,
+    dir: null,
+  };
+}
+
+function baseNameOf(p: string): string {
+  const seg = p.replace(/\\/g, '/').split('/').pop() ?? 'table';
+  return seg.replace(/\.parquet$/i, '');
+}
+
+function uniqueTableName(doc: Workspace, base: string): string {
+  const names = new Set(doc.tables.map(t => t.name));
+  if (!names.has(base)) return base;
+  let i = 2;
+  while (names.has(`${base}_${i}`)) i++;
+  return `${base}_${i}`;
+}
+
+async function persist(doc: Workspace, path: string): Promise<Workspace> {
+  return cmds.syncWorkspaceTables(path, doc);
+}
+
+export async function newWorkspaceFlow(): Promise<boolean> {
+  const selected = await save({ filters: PARASQL_FILTER });
+  if (!selected) return false;
+  const doc = emptyWorkspace(baseNameOf(selected));
+  await cmds.saveWorkspace(selected, doc);
+  const loaded = await cmds.openWorkspace(selected);
+  workspaceStore.set({
+    path: selected, doc: loaded, activeView: 'query', editorOpen: false,
+    metas: {}, loading: false, error: null,
+  });
+  return true;
+}
+
+export async function openWorkspaceFlow(path?: string): Promise<boolean> {
+  let selected = path;
+  if (!selected) {
+    const res = await open({ multiple: false, filters: PARASQL_FILTER });
+    if (!res) return false;
+    selected = res;
+  }
+  try {
+    const doc = await cmds.openWorkspace(selected);
+    workspaceStore.set({
+      path: selected, doc, activeView: 'query', editorOpen: false,
+      metas: {}, loading: false, error: null,
+    });
+    tableStore.open([], [], 0, null);
+    return true;
+  } catch (e) {
+    console.error('Failed to open workspace:', e);
+    return false;
+  }
+}
+
+export async function saveWorkspaceFlow(): Promise<boolean> {
+  const s = get(workspaceStore);
+  if (!s.doc) return false;
+  if (!s.path) return saveWorkspaceAsFlow();
+  try {
+    await cmds.saveWorkspace(s.path, s.doc);
+    return true;
+  } catch (e) {
+    console.error('Failed to save workspace:', e);
+    return false;
+  }
+}
+
+export async function saveWorkspaceAsFlow(): Promise<boolean> {
+  const s = get(workspaceStore);
+  if (!s.doc) return false;
+  const selected = await save({ defaultPath: `${s.doc.name}.parasql`, filters: PARASQL_FILTER });
+  if (!selected) return false;
+  try {
+    await cmds.saveWorkspace(selected, s.doc);
+    workspaceStore.update(v => ({ ...v, path: selected }));
+    return true;
+  } catch (e) {
+    console.error('Failed to save workspace:', e);
+    return false;
+  }
+}
+
+export async function addTableFlow(): Promise<boolean> {
+  const s = get(workspaceStore);
+  if (!s.doc || !s.path) return false;
+  const selected = await open({
+    multiple: false,
+    filters: [{ name: 'Parquet', extensions: ['parquet'] }],
+  });
+  if (!selected) return false;
+  try {
+    const meta = await cmds.getTableMeta(selected);
+    const table: WorkspaceTable = {
+      name: uniqueTableName(s.doc, baseNameOf(selected)),
+      path: selected,
+      source: 'file',
+      mode: 'query',
+      compression: meta.compression,
+      size: meta.size_bytes,
+      mtime: null,
+      abs_path: selected,
+      missing: false,
+    };
+    const doc = { ...s.doc, tables: [...s.doc.tables, table] };
+    const synced = await persist(doc, s.path);
+    workspaceStore.update(v => ({
+      ...v, doc: synced, metas: { ...v.metas, [selected]: meta },
+    }));
+    return true;
+  } catch (e) {
+    console.error('Failed to add table:', e);
+    return false;
+  }
+}
+
+export async function addFolderFlow(): Promise<boolean> {
+  const s = get(workspaceStore);
+  if (!s.doc || !s.path) return false;
+  const dir = await open({ directory: true, multiple: false });
+  if (!dir) return false;
+  try {
+    const files = await cmds.listParquetFiles(dir);
+    if (files.length === 0) return false;
+    const tables: WorkspaceTable[] = [...s.doc.tables];
+    const metas: Record<string, TableMeta> = { ...s.metas };
+    for (const f of files) {
+      const meta = await cmds.getTableMeta(f);
+      tables.push({
+        name: uniqueTableName(s.doc, baseNameOf(f)),
+        path: f,
+        source: 'file',
+        mode: 'query',
+        compression: meta.compression,
+        size: meta.size_bytes,
+        mtime: null,
+        abs_path: f,
+        missing: false,
+      });
+      metas[f] = meta;
+    }
+    const doc = { ...s.doc, tables };
+    const synced = await persist(doc, s.path);
+    workspaceStore.update(v => ({ ...v, doc: synced, metas }));
+    return true;
+  } catch (e) {
+    console.error('Failed to add folder:', e);
+    return false;
+  }
+}
+
+export async function runTableQueryFlow(name: string): Promise<void> {
+  const escaped = name.replace(/"/g, '""');
+  const result = await cmds.executeSql(`SELECT * FROM "${escaped}" LIMIT 500`);
+  tableStore.applyQueryResult(result);
+  workspaceStore.update(v => ({ ...v, activeView: 'query' }));
+}
+
+export async function removeTableFlow(name: string): Promise<boolean> {  const s = get(workspaceStore);
+  if (!s.doc || !s.path) return false;
+  const doc = { ...s.doc, tables: s.doc.tables.filter(t => t.name !== name) };
+  try {
+    const synced = await persist(doc, s.path);
+    workspaceStore.update(v => ({ ...v, doc: synced }));
+    return true;
+  } catch (e) {
+    console.error('Failed to remove table:', e);
+    return false;
+  }
+}
+
+export async function renameTableFlow(oldName: string, newName: string): Promise<boolean> {
+  const s = get(workspaceStore);
+  if (!s.doc || !s.path) return false;
+  const trimmed = newName.trim();
+  if (!trimmed || trimmed === oldName) return false;
+  if (s.doc.tables.some(t => t.name === trimmed)) return false;
+  const doc = {
+    ...s.doc,
+    tables: s.doc.tables.map(t => (t.name === oldName ? { ...t, name: trimmed } : t)),
+  };
+  try {
+    const synced = await persist(doc, s.path);
+    workspaceStore.update(v => ({ ...v, doc: synced }));
+    return true;
+  } catch (e) {
+    console.error('Failed to rename table:', e);
+    return false;
+  }
+}
+
+export async function setTableModeFlow(name: string, mode: 'query' | 'editable'): Promise<boolean> {
+  const s = get(workspaceStore);
+  if (!s.doc || !s.path) return false;
+  const doc = {
+    ...s.doc,
+    tables: s.doc.tables.map(t => (t.name === name ? { ...t, mode } : t)),
+  };
+  try {
+    const synced = await persist(doc, s.path);
+    workspaceStore.update(v => ({ ...v, doc: synced }));
+    return true;
+  } catch (e) {
+    console.error('Failed to set table mode:', e);
+    return false;
+  }
+}
+
+export async function exportTableFlow(name: string, compression = 'zstd'): Promise<boolean> {
+  const s = get(workspaceStore);
+  const table = s.doc?.tables.find(t => t.name === name);
+  if (!table) return false;
+  const selected = await save({
+    defaultPath: `${name}.parquet`,
+    filters: [{ name: 'Parquet', extensions: ['parquet'] }],
+  });
+  if (!selected) return false;
+  try {
+    await cmds.exportTable(name, selected, compression);
+    return true;
+  } catch (e) {
+    console.error('Failed to export table:', e);
+    return false;
+  }
+}
+
+export async function openEditorFlow(name: string): Promise<boolean> {
+  const s = get(workspaceStore);
+  const doc = s.doc;
+  const table = doc?.tables.find(t => t.name === name);
+  if (!table || !s.path || !doc) return false;
+  const path = table.abs_path ?? table.path;
+  try {
+    const res = await cmds.openTableForEdit(name, path, false, doc);
+    if (!res.opened && res.over_limit) {
+      const ok = confirm(
+        `"${name}" is ${res.size_mb} MB. Editing loads the full table into memory ` +
+        'and saving rewrites the whole file. Open anyway?'
+      );
+      if (!ok) return false;
+      const res2 = await cmds.openTableForEdit(name, path, true, doc);
+      if (!res2.opened) return false;
+    }
+    const [columns, rows, fileInfo] = await Promise.all([
+      cmds.getColumns(),
+      cmds.getAllRows(),
+      cmds.getFileInfo(),
+    ]);
+    tableStore.open(columns, rows, fileInfo.rows ?? rows.length, path);
+    workspaceStore.update(v => ({ ...v, editorOpen: true, activeView: 'data' }));
+    return true;
+  } catch (e) {
+    console.error('Failed to open table for editing:', e);
+    return false;
+  }
+}
+
+export async function closeEditorFlow(): Promise<void> {
+  try {
+    await cmds.closeEditor();
+  } catch {
+    // no editor open is fine
+  }
+  workspaceStore.update(v => ({ ...v, editorOpen: false }));
+}
+
+export async function showEditorDataFlow(): Promise<void> {
+  const s = get(workspaceStore);
+  workspaceStore.update(v => ({ ...v, activeView: 'data' }));
+  if (s.editorOpen && s.doc && s.path && get(tableStore).sqlResult) {
+    const columns = await cmds.getColumns();
+    const rows = await cmds.getAllRows();
+    tableStore.open(columns, rows, rows.length, s.path);
+  }
+}
+
+export async function summarizeTableFlow(name: string): Promise<TableSummary | null> {
+  try {
+    return await cmds.summarizeTable(name);
+  } catch (e) {
+    console.error('Failed to summarize table:', e);
+    return null;
+  }
+}

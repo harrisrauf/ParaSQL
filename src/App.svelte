@@ -4,8 +4,11 @@
   import Toolbar from './lib/components/Toolbar.svelte';
   import DataGrid from './lib/components/DataGrid.svelte';
   import LeftPanel from './lib/components/LeftPanel.svelte';
+  import WorkspacePanel from './lib/components/WorkspacePanel.svelte';
+  import WorkspaceMain from './lib/components/WorkspaceMain.svelte';
   import StatusBar from './lib/components/StatusBar.svelte';
   import { tableStore, selectedRowIds } from './lib/stores/table';
+  import { workspaceStore } from './lib/stores/workspace';
   import { uiStore } from './lib/stores/ui';
   import { settings } from './lib/stores/settings';
   import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -21,12 +24,16 @@
     copyValue,
     copyAsWhere,
     copyRowAsJson,
+    newWorkspaceFlow,
+    openWorkspaceFlow,
   } from './lib/actions';
   import type { RowData } from './lib/types';
 
   let hasData = $derived($tableStore.columns.length > 0);
   let selectedIds = $derived($selectedRowIds);
   let sidebarVisible = $derived($uiStore.sidebarVisible);
+  let wsOpen = $derived($workspaceStore.doc != null);
+  let editable = $derived($tableStore.editable);
 
   // Context menu state
   let contextMenu = $state<{
@@ -199,19 +206,26 @@
   <MenuBar />
   <Toolbar />
   <div class="main-content">
-    {#if hasData}
+    {#if wsOpen}
+      {#if sidebarVisible}
+        <WorkspacePanel />
+      {/if}
+      <WorkspaceMain />
+    {:else if hasData}
       {#if sidebarVisible}
         <LeftPanel />
       {/if}
       <DataGrid />
     {:else}
       <div class="welcome">
-        <h1>Parquet Viewer</h1>
-        <p>Open a .parquet file to get started.</p>
+        <h1>ParaSQL</h1>
+        <p>Open a .parquet file, or create a workspace to query many files as tables.</p>
         <p class="subtitle">Powered by DuckDB — Full SQL support for Parquet files</p>
         <div class="welcome-actions">
           <button onclick={() => openFileFlow()} class="open-btn">Open File</button>
           <button onclick={() => openFolderFlow()} class="open-btn secondary">Open Folder</button>
+          <button onclick={() => newWorkspaceFlow()} class="open-btn secondary">New Workspace</button>
+          <button onclick={() => openWorkspaceFlow()} class="open-btn secondary">Open Workspace</button>
         </div>
         {#if $settings.recentFiles.length > 0}
           <div class="welcome-recent">
@@ -244,7 +258,7 @@
         <button onclick={handleClearSortMenu}>Clear Sort</button>
         <div class="menu-sep"></div>
       {/if}
-      {#if contextMenu.kind === 'row'}
+      {#if contextMenu.kind === 'row' && editable}
         <button onclick={handleDeleteRow}>Delete row</button>
         <div class="menu-sep"></div>
       {/if}

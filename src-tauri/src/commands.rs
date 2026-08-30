@@ -411,6 +411,38 @@ pub async fn summarize_table(name: String, state: State<'_, AppState>) -> Result
     with_engine(state, move |engine| engine.summarize_table(&name)).await
 }
 
+/// Recursively list .parquet files under a directory (for folder import).
+#[tauri::command]
+pub async fn list_parquet_files(dir: String) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut out = Vec::new();
+        let mut stack = vec![std::path::PathBuf::from(&dir)];
+        while let Some(p) = stack.pop() {
+            match std::fs::read_dir(&p) {
+                Ok(entries) => {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.is_dir() {
+                            stack.push(path);
+                        } else if path
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .is_some_and(|e| e.eq_ignore_ascii_case("parquet"))
+                        {
+                            out.push(path.to_string_lossy().to_string());
+                        }
+                    }
+                }
+                Err(_) => continue,
+            }
+        }
+        out.sort();
+        Ok(out)
+    })
+    .await
+    .map_err(|e| format!("Background task error: {}", e))?
+}
+
 #[tauri::command]
 pub fn debug_log(msg: String) {
     println!("[webview] {}", msg);
