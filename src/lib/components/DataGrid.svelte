@@ -80,6 +80,17 @@
     }
   });
 
+  // Scroll to a focused row (e.g. freshly inserted) and select it
+  $effect(() => {
+    const id = $tableStore.focusRowId;
+    if (id == null) return;
+    const idx = displayedIndexMap.get(id);
+    if (idx == null || idx >= rows.length) return;
+    $vizerStore.scrollToIndex(idx, { align: 'start' });
+    tableStore.selectCell(rows[idx].row_id, 0);
+    tableStore.update(s => ({ ...s, focusRowId: null }));
+  });
+
   // Seed column widths when new columns appear
   $effect(() => {
     if (!columns.length) return;
@@ -315,10 +326,12 @@
               title="Filter"
               tabindex="-1"
             >▾</button>
+            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
             <div
               class="resize-handle"
               role="separator"
               aria-orientation="vertical"
+              onclick={(e) => e.stopPropagation()}
               onpointerdown={(e) => startResize(e, col.name)}
               onpointermove={onResizeMove}
               onpointerup={endResize}

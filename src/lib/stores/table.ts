@@ -28,6 +28,9 @@ interface TableState {
   savedTable: { columns: ColumnInfo[]; rows: RowData[]; totalRows: number } | null;
   activeTab: 'data' | 'schema' | 'query' | 'metadata';
   loadingMore: boolean;
+  searchRows: RowData[] | null;
+  searchTruncated: boolean;
+  focusRowId: number | null;
 }
 
 function emptySelection(): SelectionState {
@@ -52,6 +55,9 @@ function createTableStore() {
     savedTable: null,
     activeTab: 'data',
     loadingMore: false,
+    searchRows: null,
+    searchTruncated: false,
+    focusRowId: null,
   });
 
   function toggleSort(column: string) {
@@ -66,7 +72,14 @@ function createTableStore() {
   }
 
   function setSearch(query: string, column: string | null = null) {
-    update(state => ({ ...state, search: { query, column } }));
+    update(state => {
+      const cleared = query === '';
+      return {
+        ...state,
+        search: { query, column },
+        ...(cleared ? { searchRows: null, searchTruncated: false } : {}),
+      };
+    });
   }
 
   function setSqlResult(result: QueryResult | null) {
@@ -138,13 +151,19 @@ function createTableStore() {
       savedTable: null,
       activeTab: 'data',
       loadingMore: false,
+      searchRows: null,
+      searchTruncated: false,
+      focusRowId: null,
     });
   }
 
   function updateRow(rowId: number, newRow: RowData) {
     update(state => {
       const rows = state.rows.map(r => r.row_id === rowId ? newRow : r);
-      return { ...state, rows };
+      const searchRows = state.searchRows
+        ? state.searchRows.map(r => r.row_id === rowId ? newRow : r)
+        : null;
+      return { ...state, rows, searchRows };
     });
   }
 
@@ -152,12 +171,16 @@ function createTableStore() {
     update(state => {
       const removeSet = new Set(rowIds);
       const rows = state.rows.filter(r => !removeSet.has(r.row_id));
+      const searchRows = state.searchRows
+        ? state.searchRows.filter(r => !removeSet.has(r.row_id))
+        : null;
       const cells = new Set(
         [...state.selection.cells].filter(k => !removeSet.has(Number(k.slice(0, k.indexOf(':')))))
       );
       return {
         ...state,
         rows,
+        searchRows,
         selection: { anchor: null, cells, allRows: state.selection.allRows },
         totalRows: Math.max(0, state.totalRows - removeSet.size),
       };
@@ -213,10 +236,11 @@ function createTableStore() {
 
   function selectAll() {
     update(state => {
-      const total = state.rows.length * state.columns.length;
+      const base = state.searchRows ?? state.rows;
+      const total = base.length * state.columns.length;
       if (total <= 100_000) {
         const cells = new Set<string>();
-        for (const r of state.rows) {
+        for (const r of base) {
           for (let c = 0; c < state.columns.length; c++) cells.add(`${r.row_id}:${c}`);
         }
         return { ...state, selection: { anchor: null, cells, allRows: false } };
@@ -227,6 +251,11 @@ function createTableStore() {
 
   function clearSelection() {
     update(state => ({ ...state, selection: emptySelection() }));
+  }
+
+  /** Scroll to and select a row (used after inserting a new row) */
+  function focusRow(rowId: number) {
+    update(state => ({ ...state, focusRowId: rowId }));
   }
 
   // --- Column widths ---
@@ -264,6 +293,7 @@ function createTableStore() {
   async function loadMore() {
     const state = getCurrent();
     if (state.loadingMore) return;
+    if (state.searchRows !== null) return;
     if (state.sqlResult !== null || state.rows.length >= state.totalRows) return;
     update(s => ({ ...s, loadingMore: true }));
     try {
@@ -305,6 +335,7 @@ function createTableStore() {
     setRange,
     selectAll,
     clearSelection,
+    focusRow,
     setColumnWidth,
     toggleFilter,
     setFilter,
@@ -343,7 +374,10 @@ export const selectedRowIds = derived(tableStore, ($t) => {
 });
 
 /** True when the engine's full result set is loaded (no more pages to fetch) */
-export const allLoaded = derived(tableStore, ($t) => $t.sqlResult !== null || $t.rows.length >= $t.totalRows);
+export const allLoaded = derived(
+  tableStore,
+  ($t) => $t.sqlResult !== null || $t.searchRows !== null || $t.rows.length >= $t.totalRows
+);
 
 /** Unique cell values for a column (for filter popovers) */
 export function distinctValues(rows: RowData[], colIdx: number): (string | null)[] {
@@ -364,20 +398,21 @@ export const displayedRows = derived(tableStore, ($table) => {
   let memo: {
     columns: ColumnInfo[] | null;
     rows: RowData[] | null;
+    searchRows: RowData[] | null;
     filters: Record<string, Set<string | null>> | null;
     search: SearchConfig | null;
     sort: SortConfig | null;
     out: RowData[];
-  } = { columns: null, rows: null, filters: null, search: null, sort: null, out: [] };
+  } = { columns: null, rows: null, searchRows: null, filters: null, search: null, sort: null, out: [] };
   return compute($table);
   function compute($table: TableState): RowData[] {
-    const { columns, rows, filters, search, sort } = $table;
-    if (memo.columns === columns && memo.rows === rows && memo.filters === filters && memo.search === search && memo.sort === sort) {
+    const { columns, rows, searchRows, filters, search, sort } = $table;
+    if (memo.columns === columns && memo.rows === rows && memo.searchRows === searchRows && memo.filters === filters && memo.search === search && memo.sort === sort) {
       return memo.out;
     }
     const colIdxOf = new Map(columns.map((c, i) => [c.name, i] as const));
 
-    let out = rows;
+    let out = searchRows ?? rows;
 
     // Column filters (AND across columns)
     const filterCols = columns.filter(c => filters[c.name]?.size > 0);
@@ -433,7 +468,7 @@ export const displayedRows = derived(tableStore, ($table) => {
       }
     }
 
-    memo = { columns, rows, filters, search, sort, out };
+    memo = { columns, rows, searchRows, filters, search, sort, out };
     return out;
   }
 });

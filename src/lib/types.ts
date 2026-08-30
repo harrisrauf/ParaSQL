@@ -14,6 +14,11 @@ export interface QueryResult {
   rows: RowData[];
 }
 
+export interface SearchResult {
+  rows: RowData[];
+  truncated: boolean;
+}
+
 export interface MetadataJson {
   columns: ColumnInfo[];
   total_rows: number;

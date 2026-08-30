@@ -1,5 +1,7 @@
 use arrow::array::*;
 use arrow::record_batch::RecordBatch;
+use chrono::{Duration as ChronoDuration, NaiveDate, NaiveDateTime};
+use duckdb::types::ToSql;
 use duckdb::Connection;
 use serde_json::Value as JsonValue;
 
@@ -234,6 +236,62 @@ impl DuckDbEngine {
         rows_from_batch(&batch, 0)
     }
 
+    const SEARCH_LIMIT: usize = 5000;
+
+    /// Whole-table case-insensitive search across all columns (or one column).
+    /// Matches are scanned by DuckDB (not by the frontend), so unloaded rows
+    /// are searchable. Returns (rows, truncated) — truncated is true when more
+    /// than SEARCH_LIMIT rows matched.
+    pub fn search_rows(
+        &self,
+        query: &str,
+        column: Option<&str>,
+    ) -> Result<(Vec<RowData>, bool), String> {
+        let columns = self.column_info()?;
+        if columns.is_empty() {
+            return Ok((Vec::new(), false));
+        }
+
+        let pattern = format!("%{}%", escape_like(query));
+        // CAST to VARCHAR: ILIKE only accepts string operands (e.g. BIGINT columns)
+        let (cond, params): (String, Vec<&dyn ToSql>) = match column {
+            Some(name) => (
+                format!(
+                    "CAST({} AS VARCHAR) ILIKE ? ESCAPE '\\'",
+                    quote_ident(name)
+                ),
+                vec![&pattern],
+            ),
+            None => (
+                columns
+                    .iter()
+                    .map(|c| {
+                        format!(
+                            "CAST({} AS VARCHAR) ILIKE ? ESCAPE '\\'",
+                            quote_ident(&c.name)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" OR "),
+                vec![&pattern; columns.len()],
+            ),
+        };
+
+        let sql = format!(
+            "SELECT * FROM {} WHERE {} ORDER BY _row_id LIMIT {}",
+            self.table_name,
+            cond,
+            Self::SEARCH_LIMIT + 1
+        );
+        let batch = self.query_to_batch_params(&sql, &params)?;
+        let mut rows = rows_from_batch(&batch, 0)?;
+        let truncated = rows.len() > Self::SEARCH_LIMIT;
+        if truncated {
+            rows.truncate(Self::SEARCH_LIMIT);
+        }
+        Ok((rows, truncated))
+    }
+
     /// Execute a raw SQL query and return results as rows
     pub fn execute_sql(&self, sql: &str) -> Result<QueryResult, String> {
         let batch = self.query_to_batch(sql)?;
@@ -367,18 +425,13 @@ impl DuckDbEngine {
 
         let col_idents: Vec<String> = columns.iter().map(|c| quote_ident(&c.name)).collect();
 
-        // Build DEFAULT values based on column types
-        let defaults: Vec<String> = columns.iter().map(|c| {
-            match c.dtype.to_lowercase().as_str() {
-                "int32" | "int64" | "integer" | "bigint" => "0".to_string(),
-                "float32" | "float64" | "float" | "double" => "0.0".to_string(),
-                "boolean" | "bool" => "FALSE".to_string(),
-                "date" => "'1970-01-01'::DATE".to_string(),
-                "timestamp" | "timestamp_ms" | "timestamp_us" | "timestamp_ns" => "'1970-01-01T00:00:00'::TIMESTAMP".to_string(),
-                "varchar" | "utf8" | "text" | "string" => "''".to_string(),
-                _ => "NULL".to_string(),
-            }
-        }).collect();
+        // Pattern-aware defaults: peek at the last few rows of each column and
+        // continue the observed sequence (constant step, or +1 fallback) instead
+        // of blanking the row. O(1) per column — no full-column scans.
+        let mut defaults = Vec::with_capacity(columns.len());
+        for c in &columns {
+            defaults.push(self.next_default(&c.name, &c.dtype)?);
+        }
 
         // Materialize the row_id now so undo/redo are exact and deterministic
         let row_id_sql = format!(
@@ -419,6 +472,48 @@ impl DuckDbEngine {
             columns: self.column_info()?,
             rows,
         })
+    }
+
+    /// Last `n` values of a column, newest first (used for pattern detection)
+    fn last_values(&self, col: &str, n: usize) -> Result<Vec<JsonValue>, String> {
+        let sql = format!(
+            "SELECT {} FROM {} ORDER BY _row_id DESC LIMIT {}",
+            quote_ident(col),
+            self.table_name,
+            n
+        );
+        let batch = self.query_to_batch(&sql)?;
+        let rows = rows_from_batch(&batch, 0)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| r.values.into_iter().next().unwrap_or(JsonValue::Null))
+            .collect())
+    }
+
+    /// Compute a pattern-aware SQL default literal for one column
+    fn next_default(&self, name: &str, dtype: &str) -> Result<String, String> {
+        let last3 = self.last_values(name, 3)?;
+        let t = dtype.to_lowercase();
+        let lit = if is_int_dtype(&t) {
+            next_int_default(&last3)
+        } else if is_float_dtype(&t) {
+            next_float_default(&last3)
+        } else if t.starts_with("date") {
+            next_date_default(&last3)
+        } else if t.starts_with("timestamp") {
+            next_timestamp_default(&last3)
+        } else if t == "boolean" || t == "bool" {
+            last3
+                .iter()
+                .find_map(|v| v.as_bool())
+                .map(|b| if b { "TRUE" } else { "FALSE" }.to_string())
+                .unwrap_or_else(|| "FALSE".to_string())
+        } else if is_string_dtype(&t) {
+            next_string_default(&last3)
+        } else {
+            "NULL".to_string()
+        };
+        Ok(lit)
     }
 
     /// Add a new column
@@ -734,13 +829,21 @@ impl DuckDbEngine {
     /// Returns an empty-schema batch (0 rows) when the query yields no results,
     /// so empty files, past-end pages and non-SELECT statements behave cleanly.
     fn query_to_batch(&self, sql: &str) -> Result<RecordBatch, String> {
+        self.query_to_batch_params(sql, &[])
+    }
+
+    fn query_to_batch_params(
+        &self,
+        sql: &str,
+        params: &[&dyn ToSql],
+    ) -> Result<RecordBatch, String> {
         let mut stmt = self
             .conn
             .prepare(sql)
             .map_err(|e| format!("Failed to prepare query: {}", e))?;
 
         let arrow_result = stmt
-            .query_arrow([])
+            .query_arrow(params)
             .map_err(|e| format!("Failed to execute query: {}", e))?;
 
         let schema = arrow_result.get_schema();
@@ -786,6 +889,151 @@ fn json_to_literal(v: &JsonValue) -> Result<String, String> {
         JsonValue::Bool(b) => Ok(if *b { "TRUE" } else { "FALSE" }.to_string()),
         _ => Ok(format!("'{}'", v.to_string().replace('\'', "''"))),
     }
+}
+
+/// Escape a LIKE pattern so the user's query is matched literally
+fn escape_like(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+// --- Pattern-aware insert defaults ---
+// The +Row action continues the observed sequence in each column instead of
+// blanking it. Only the last 3 rows are inspected (O(1) per column).
+
+fn is_int_dtype(t: &str) -> bool {
+    matches!(
+        t,
+        "int8" | "int16" | "int32" | "int64" | "integer" | "bigint" | "tinyint" | "smallint"
+            | "hugeint" | "uint8" | "uint16" | "uint32" | "uint64"
+    )
+}
+
+fn is_float_dtype(t: &str) -> bool {
+    matches!(t, "float32" | "float64" | "float" | "double" | "real")
+}
+
+fn is_string_dtype(t: &str) -> bool {
+    matches!(t, "varchar" | "utf8" | "text" | "string" | "char")
+}
+
+/// Integers: continue a constant step if confirmed by two consecutive steps,
+/// otherwise previous + 1.
+fn next_int_default(last3: &[JsonValue]) -> String {
+    let nums: Vec<i64> = last3.iter().filter_map(|v| v.as_i64()).collect();
+    match nums.as_slice() {
+        [] => "0".to_string(),
+        [n0] => (n0 + 1).to_string(),
+        [n0, n1, ..] => {
+            let step = n0 - n1;
+            if nums.len() >= 3 && (nums[1] - nums[2]) == step && step != 0 {
+                (n0 + step).to_string()
+            } else {
+                (n0 + 1).to_string()
+            }
+        }
+    }
+}
+
+fn next_float_default(last3: &[JsonValue]) -> String {
+    let nums: Vec<f64> = last3.iter().filter_map(|v| v.as_f64()).collect();
+    match nums.as_slice() {
+        [] => "0.0".to_string(),
+        [n0] => (n0 + 1.0).to_string(),
+        [n0, n1, ..] => {
+            let step = n0 - n1;
+            if nums.len() >= 3 && (nums[1] - nums[2] - step).abs() < 1e-9 && step != 0.0 {
+                (n0 + step).to_string()
+            } else {
+                (n0 + 1.0).to_string()
+            }
+        }
+    }
+}
+
+fn next_date_default(last3: &[JsonValue]) -> String {
+    let dates: Vec<NaiveDate> = last3
+        .iter()
+        .filter_map(|v| v.as_str())
+        .filter_map(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
+        .collect();
+    let one_day = ChronoDuration::days(1);
+    match dates.as_slice() {
+        [] => "NULL".to_string(),
+        [d0] => format!("'{}'::DATE", (*d0 + one_day).format("%Y-%m-%d")),
+        [d0, d1, ..] => {
+            let step = *d0 - *d1;
+            let next = if dates.len() >= 3 && (dates[1] - dates[2]) == step && step.num_days() != 0
+            {
+                *d0 + step
+            } else {
+                *d0 + one_day
+            };
+            format!("'{}'::DATE", next.format("%Y-%m-%d"))
+        }
+    }
+}
+
+fn parse_timestamp(s: &str) -> Option<NaiveDateTime> {
+    NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.3f")
+        .ok()
+        .or_else(|| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok())
+        .or_else(|| NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.3f").ok())
+}
+
+fn next_timestamp_default(last3: &[JsonValue]) -> String {
+    let ts: Vec<NaiveDateTime> = last3
+        .iter()
+        .filter_map(|v| v.as_str())
+        .filter_map(parse_timestamp)
+        .collect();
+    let one_day = ChronoDuration::days(1);
+    match ts.as_slice() {
+        [] => "NULL".to_string(),
+        [t0] => format!("'{}'::TIMESTAMP", (*t0 + one_day).format("%Y-%m-%d %H:%M:%S")),
+        [t0, t1, ..] => {
+            let step = *t0 - *t1;
+            let next = if ts.len() >= 3 && (ts[1] - ts[2]) == step && step.num_seconds() != 0 {
+                *t0 + step
+            } else {
+                *t0 + one_day
+            };
+            format!("'{}'::TIMESTAMP", next.format("%Y-%m-%d %H:%M:%S"))
+        }
+    }
+}
+
+/// Split "ID-0003" into ("ID-", 3, 4). Returns None when there's no trailing number.
+fn split_trailing_number(s: &str) -> Option<(&str, i64, usize)> {
+    let bytes = s.as_bytes();
+    let mut i = bytes.len();
+    while i > 0 && bytes[i - 1].is_ascii_digit() {
+        i -= 1;
+    }
+    if i == bytes.len() {
+        return None;
+    }
+    let num = s[i..].parse::<i64>().ok()?;
+    Some((&s[..i], num, s.len() - i))
+}
+
+/// Strings: continue a "prefix + zero-padded counter" convention when the last
+/// two values follow it (e.g. "ID-0001", "ID-0002" -> "ID-0003"), else blank.
+fn next_string_default(last3: &[JsonValue]) -> String {
+    let strs: Vec<&str> = last3.iter().filter_map(|v| v.as_str()).collect();
+    if strs.len() >= 2 {
+        if let (Some((pre0, num0, w0)), Some((pre1, num1, w1))) = (
+            split_trailing_number(strs[0]),
+            split_trailing_number(strs[1]),
+        ) {
+            if pre0 == pre1 && w0 == w1 && num1 == num0 - 1 {
+                let next = format!("{}{:0width$}", pre0, num0 + 1, width = w0);
+                return format!("'{}'", next.replace('\'', "''"));
+            }
+        }
+    }
+    "''".to_string()
 }
 
 /// Map a DuckDB column type to the requested SQL dialect

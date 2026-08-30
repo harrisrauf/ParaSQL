@@ -105,8 +105,9 @@ fn insert_row_returns_row_aligned_with_columns() {
         "inserted row values must align with data columns (RETURNING must not duplicate _row_id)"
     );
     assert_eq!(row.row_id, 1023);
-    assert_eq!(row.values[0], serde_json::json!(0), "BIGINT default 0");
-    assert_eq!(row.values[1], serde_json::json!(""), "VARCHAR default ''");
+    // Pattern-aware defaults: id continues 0..1021 -> 1022, name "value_1022"
+    assert_eq!(row.values[0], serde_json::json!(1022), "BIGINT pattern default");
+    assert_eq!(row.values[1], serde_json::json!("value_1022"), "VARCHAR pattern default");
 
     let rows = engine.get_all_rows().unwrap();
     assert_eq!(rows.len(), 1023);
@@ -314,4 +315,82 @@ fn undo_redo_round_trips_for_all_mutations() {
         serde_json::json!(539),
         "10 undos from value 549 must land on 539"
     );
+}
+
+#[test]
+fn search_rows_finds_values_across_all_columns() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("sample.parquet");
+    write_sample_parquet(&path);
+
+    let engine = DuckDbEngine::open_parquet(path.to_str().unwrap()).unwrap();
+
+    // Whole-table search: matches values in any column, including the name column
+    let (rows, truncated) = engine.search_rows("value_1020", None).unwrap();
+    assert!(!truncated);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].row_id, 1021);
+    assert_eq!(rows[0].values[1], serde_json::json!("value_1020"));
+
+    // Case-insensitive (matches value_5 first by row order; also value_50..59)
+    let (rows, _) = engine.search_rows("VALUE_5", None).unwrap();
+    assert!(rows.len() >= 1);
+    assert_eq!(rows[0].row_id, 6);
+
+    // Per-column search
+    let (rows, _) = engine.search_rows("1020", Some("name")).unwrap();
+    assert_eq!(rows.len(), 1);
+    let (rows, _) = engine.search_rows("1020", Some("id")).unwrap();
+    assert_eq!(rows.len(), 1, "id 1020 exists (0-indexed)");
+
+    // LIKE metacharacters in the query are treated literally
+    let (rows, _) = engine.search_rows("100%", None).unwrap();
+    assert!(rows.is_empty(), "no value contains a literal '%'");
+
+    // No match -> empty, not truncated
+    let (rows, truncated) = engine.search_rows("zzz_nope", None).unwrap();
+    assert!(rows.is_empty());
+    assert!(!truncated);
+
+    // Null values never match
+    let (rows, _) = engine.search_rows("null", None).unwrap();
+    assert!(rows.is_empty());
+}
+
+#[test]
+fn insert_row_continues_patterns_without_scanning() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("pattern.parquet");
+    let conn = duckdb::Connection::open_in_memory().unwrap();
+    let sql = r#"
+        CREATE TABLE t (id INT, code VARCHAR, ts TIMESTAMP, val DOUBLE);
+        INSERT INTO t VALUES
+          (1, 'ID-0001', TIMESTAMP '2024-01-01 00:00:00', 1.5),
+          (2, 'ID-0002', TIMESTAMP '2024-01-01 00:01:00', 2.5),
+          (3, 'ID-0003', TIMESTAMP '2024-01-01 00:02:00', 3.5);
+        COPY t TO '<path>' (FORMAT PARQUET);
+        "#
+    .replace("<path>", &path.to_str().unwrap().replace('\'', "''"));
+    conn.execute_batch(&sql).unwrap();
+
+    let mut engine = DuckDbEngine::open_parquet(path.to_str().unwrap()).unwrap();
+    let row = engine.insert_row().unwrap().rows[0].clone();
+
+    // int: constant +1 step confirmed -> 4
+    assert_eq!(row.values[0], serde_json::json!(4));
+    // varchar: "prefix + zero-padded counter" convention -> ID-0004
+    assert_eq!(row.values[1], serde_json::json!("ID-0004"));
+    // timestamp: constant 60s step -> +1 minute
+    assert_eq!(
+        row.values[2],
+        serde_json::json!("2024-01-01 00:03:00.000")
+    );
+    // float: constant +1.0 step -> 4.5
+    assert_eq!(row.values[3], serde_json::json!(4.5));
+
+    // A second insert continues the (now extended) sequence
+    let row2 = engine.insert_row().unwrap().rows[0].clone();
+    assert_eq!(row2.values[0], serde_json::json!(5));
+    assert_eq!(row2.values[1], serde_json::json!("ID-0005"));
+    assert_eq!(row2.values[3], serde_json::json!(5.5));
 }

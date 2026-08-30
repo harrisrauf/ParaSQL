@@ -141,6 +141,19 @@ pub async fn get_page(
 }
 
 #[tauri::command]
+pub async fn search_rows(
+    query: String,
+    column: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    with_engine(state, move |engine| {
+        let (rows, truncated) = engine.search_rows(&query, column.as_deref())?;
+        Ok(serde_json::json!({ "rows": rows, "truncated": truncated }))
+    })
+    .await
+}
+
+#[tauri::command]
 pub async fn get_columns(state: State<'_, AppState>) -> Result<Vec<ColumnInfo>, String> {
     with_engine(state, move |engine| engine.column_info()).await
 }

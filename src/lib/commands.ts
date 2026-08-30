@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { ColumnInfo, RowData, QueryResult, MetadataJson } from './types';
+import type { ColumnInfo, RowData, QueryResult, MetadataJson, SearchResult } from './types';
 
 export async function openFile(path: string): Promise<MetadataJson> {
   return invoke('open_file', { path });
@@ -35,6 +35,10 @@ export async function getAllRows(): Promise<RowData[]> {
 
 export async function getPage(offset: number, limit: number): Promise<RowData[]> {
   return invoke('get_page', { offset, limit });
+}
+
+export async function searchRows(query: string, column: string | null = null): Promise<SearchResult> {
+  return invoke('search_rows', { query, column });
 }
 
 export async function getColumns(): Promise<ColumnInfo[]> {

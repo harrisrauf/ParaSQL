@@ -12,6 +12,8 @@
   let visibleRows = $derived($displayedRows);
   let selected = $derived($selectedRowIds);
   let sqlResult = $derived($tableStore.sqlResult);
+  let searchRows = $derived($tableStore.searchRows);
+  let searchTruncated = $derived($tableStore.searchTruncated);
 
   let fileName = $derived(filePath ? filePath.split(/[\\/]/).pop() : '');
   let filtered = $derived(
@@ -37,6 +39,12 @@
   {/if}
   {#if sqlResult}
     <span class="status-item query-badge">query results</span>
+  {/if}
+  {#if searchRows}
+    <span class="status-item match-badge">
+      {searchRows.length.toLocaleString()} match{searchRows.length === 1 ? '' : 'es'}
+      {#if searchTruncated}(first {searchRows.length.toLocaleString()} shown){/if}
+    </span>
   {/if}
   <span class="status-spacer"></span>
   {#if fileName}
