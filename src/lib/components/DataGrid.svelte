@@ -297,7 +297,7 @@
   }
 </script>
 
-<div class="grid" bind:this={containerEl} tabindex="0" role="grid" aria-label="Data grid" onkeydown={handleKeydown}>
+<div class="grid" class:compact={density === 'compact'} bind:this={containerEl} tabindex="0" role="grid" aria-label="Data grid" onkeydown={handleKeydown}>
   <div class="grid-scroll" bind:this={scrollEl}>
     <div class="grid-inner" style="width: {gridWidth}px; min-width: 100%;">
       <div class="grid-header">
@@ -305,6 +305,7 @@
         {#each columns as col (col.name)}
           <div
             class="col-header"
+            data-col={col.name}
             style="width: {effectiveWidths[col.name]}px;"
             onclick={() => {
               filterAnchor = null;
@@ -530,7 +531,7 @@
     left: 0;
     right: 0;
     display: flex;
-    align-items: center;
+    align-items: stretch;
     border-bottom: 1px solid var(--border-subtle, #f0f0f0);
     box-sizing: border-box;
   }
@@ -562,6 +563,9 @@
     cursor: pointer;
     overflow: hidden;
     text-overflow: ellipsis;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .row-id-cell:hover {
@@ -576,6 +580,8 @@
     overflow: hidden;
     box-sizing: border-box;
     border-right: 1px solid var(--border-subtle, #f0f0f0);
+    display: flex;
+    align-items: center;
   }
 
   .cell.selected {
@@ -612,5 +618,9 @@
   :global(.grid.compact) .grid-row,
   :global(.grid.compact) .cell {
     font-size: 12px;
+  }
+
+  :global(.grid.compact) .cell {
+    padding: 2px 8px;
   }
 </style>

@@ -248,6 +248,40 @@ export async function copyValue(value: string): Promise<void> {
   await navigator.clipboard.writeText(value);
 }
 
+/// JSON array of objects for the current selection (row-major, column-named),
+/// mirroring copySelectionToClipboard's selection semantics.
+export async function copySelectionAsJson(): Promise<void> {
+  const state = get(tableStore);
+  const cols = state.columns;
+  if (cols.length === 0) return;
+
+  let rows: RowData[];
+  if (state.selection.allRows) {
+    rows = get(displayedRows);
+  } else {
+    const cells = state.selection.cells;
+    if (cells.size === 0) return;
+    const rowIds = new Set<number>();
+    for (const key of cells) {
+      rowIds.add(Number(key.slice(0, key.indexOf(':'))));
+    }
+    const rowIndex = new Map(get(displayedRows).map((r, i) => [r.row_id, i]));
+    rows = [...rowIds]
+      .sort((a, b) => (rowIndex.get(a) ?? 0) - (rowIndex.get(b) ?? 0))
+      .map(rid => state.rows.find(r => r.row_id === rid))
+      .filter((r): r is RowData => !!r);
+  }
+
+  const objects = rows.map(r => {
+    const obj: Record<string, string | number | boolean | null> = {};
+    cols.forEach((c, i) => {
+      obj[c.name] = r.values[i] ?? null;
+    });
+    return obj;
+  });
+  await navigator.clipboard.writeText(JSON.stringify(objects, null, 2));
+}
+
 export async function copyAsWhere(colName: string, value: string): Promise<void> {
   const escaped = value.replace(/'/g, "''");
   await navigator.clipboard.writeText(`${colName} = '${escaped}'`);

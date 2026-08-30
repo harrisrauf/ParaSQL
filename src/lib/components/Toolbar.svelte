@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import SearchBar from './SearchBar.svelte';
-  import { settings } from '../stores/settings';
   import { uiStore } from '../stores/ui';
   import { tableStore, selectedRowIds } from '../stores/table';
   import {
@@ -24,7 +23,6 @@
   let hasData = $derived($tableStore.columns.length > 0);
   let modified = $derived($tableStore.modified);
   let selectedCount = $derived($selectedRowIds.size);
-  let darkMode = $derived($settings.darkMode);
   let sidebarVisible = $derived($uiStore.sidebarVisible);
 
   async function refreshUndoRedo() {
@@ -55,6 +53,21 @@
 <!-- svelte-ignore a11y_click_events_have_key_events -->
 <div class="toolbar" role="toolbar" aria-label="Toolbar" tabindex="-1" onclick={(e) => e.stopPropagation()}>
   <div class="toolbar-group">
+    <button
+      class="tb-btn"
+      title="Toggle Sidebar"
+      class:active={sidebarVisible}
+      onclick={() => uiStore.toggleSidebar()}
+    >
+      <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+        <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4" />
+        <line x1="10.5" y1="2.5" x2="10.5" y2="13.5" stroke="currentColor" stroke-width="1.4" />
+        <line x1="1.5" y1="6" x2="10.5" y2="6" stroke="currentColor" stroke-width="1.4" />
+      </svg>
+    </button>
+  </div>
+
+  <div class="toolbar-group">
     <button class="tb-btn" onclick={(e) => { e.stopPropagation(); toggleDropdown('open'); }}>
       Open <span class="caret">▾</span>
     </button>
@@ -69,8 +82,18 @@
   </div>
 
   <div class="toolbar-group">
-    <button class="tb-btn" disabled={!undoAvail} title="Undo (Ctrl+Z)" onclick={() => runAction(() => undoFlow())}>↩</button>
-    <button class="tb-btn" disabled={!redoAvail} title="Redo (Ctrl+Y)" onclick={() => runAction(() => redoFlow())}>↪</button>
+    <button class="tb-btn icon-btn" disabled={!undoAvail} title="Undo (Ctrl+Z)" onclick={() => runAction(() => undoFlow())}>
+      <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+        <path d="M6.5 4 3 7.5l3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+        <path d="M3 7.5h6.5a3.5 3.5 0 0 1 0 7H7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+      </svg>
+    </button>
+    <button class="tb-btn icon-btn" disabled={!redoAvail} title="Redo (Ctrl+Y)" onclick={() => runAction(() => redoFlow())}>
+      <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+        <path d="m9.5 4 3.5 3.5-3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+        <path d="M13 7.5H6.5a3.5 3.5 0 0 0 0 7H9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+      </svg>
+    </button>
   </div>
 
   <div class="toolbar-group">
@@ -94,17 +117,6 @@
   <div class="toolbar-spacer"></div>
 
   <SearchBar />
-  <button
-    class="tb-btn"
-    title="Toggle Sidebar"
-    class:active={sidebarVisible}
-    onclick={() => uiStore.toggleSidebar()}
-  >▤</button>
-  <button
-    class="tb-btn"
-    title="Toggle Dark Mode"
-    onclick={() => settings.toggleDarkMode()}
-  >{darkMode ? '☀️' : '🌙'}</button>
 </div>
 
 <style>
@@ -116,7 +128,7 @@
     background: var(--toolbar-bg, #fafafa);
     border-bottom: 1px solid var(--border-color, #e0e0e0);
     flex-shrink: 0;
-    overflow: hidden;
+    overflow: visible;
     position: relative;
     z-index: 50;
   }
@@ -145,6 +157,13 @@
 
   .tb-btn:hover:not(:disabled) {
     background: var(--hover-bg, #e8e8e8);
+  }
+
+  .tb-btn.icon-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px 6px;
   }
 
   .tb-btn:disabled {

@@ -39,6 +39,7 @@
   }
 
   let openMenu = $state<string | null>(null);
+  let menubarEl = $state<HTMLElement | null>(null);
   let undoAvail = $state(false);
   let redoAvail = $state(false);
 
@@ -181,14 +182,32 @@
       openMenu = null;
     };
     document.addEventListener('click', close);
-    return () => document.removeEventListener('click', close);
+    document.addEventListener('mousemove', handleMouseMove);
+    return () => {
+      document.removeEventListener('click', close);
+      document.removeEventListener('mousemove', handleMouseMove);
+    };
   });
+
+  // Close the open menu once the pointer leaves both the bar and the open
+  // dropdown (standard menu-bar hover-out behavior).
+  function handleMouseMove(e: MouseEvent) {
+    if (!openMenu) return;
+    const bar = menubarEl?.getBoundingClientRect();
+    if (!bar) return;
+    const inside = (r: DOMRect) =>
+      e.clientX >= r.left && e.clientX <= r.right &&
+      e.clientY >= r.top && e.clientY <= r.bottom;
+    const drop = document.querySelector('.menu-dropdown')?.getBoundingClientRect();
+    if (inside(bar) || (drop && inside(drop))) return;
+    openMenu = null;
+  }
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
-<div class="menubar" role="menubar" aria-label="Main menu" tabindex="-1" onclick={(e) => e.stopPropagation()}>
+<div class="menubar" role="menubar" aria-label="Main menu" tabindex="-1" bind:this={menubarEl} onclick={(e) => e.stopPropagation()}>
   {#each menus as menu (menu.id)}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
