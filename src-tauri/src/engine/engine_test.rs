@@ -426,3 +426,149 @@ fn insert_row_does_not_guess_without_a_confirmed_pattern() {
     assert_eq!(row.values[2], serde_json::json!(18));
     assert_eq!(row.values[3], serde_json::json!("A-18"));
 }
+
+fn write_keyed_parquet(path: &std::path::Path, id: i64, label: &str) {
+    let conn = duckdb::Connection::open_in_memory().unwrap();
+    let sql = format!(
+        "CREATE TABLE t (id INT, val INT, label VARCHAR); \
+         INSERT INTO t VALUES ({}, 100, '{}'), ({}, 200, '{}'); \
+         COPY t TO '{}' (FORMAT PARQUET);",
+        id, label, id + 1, label,
+        path.display().to_string().replace('\'', "''")
+    );
+    conn.execute_batch(&sql).unwrap();
+}
+
+#[test]
+fn workspace_save_load_resolves_paths_and_flags_missing() {
+    use super::catalog;
+    use std::path::Path;
+
+    let dir = tempdir().unwrap();
+    let ws_path = dir.path().join("test.parasql");
+    let p1 = dir.path().join("a.parquet");
+    let p2 = dir.path().join("b.parquet");
+    write_sample_parquet(&p1);
+    write_sample_parquet(&p2);
+
+    let mut ws = catalog::Workspace::new("t");
+    ws.add_table("a", p1.to_str().unwrap(), "file", "query");
+    ws.add_table("b", p2.to_str().unwrap(), "file", "query");
+    ws.add_table(
+        "gone",
+        dir.path().join("missing.parquet").to_str().unwrap(),
+        "file",
+        "query",
+    );
+    ws.dir = Some(dir.path().to_string_lossy().to_string());
+    catalog::write_workspace(&ws_path.to_str().unwrap(), &ws).unwrap();
+
+    let loaded = catalog::load_workspace(&ws_path.to_str().unwrap()).unwrap();
+    assert_eq!(loaded.tables.len(), 3);
+    let a = loaded.table("a").unwrap();
+    assert!(!a.missing);
+    assert!(a.abs_path.as_deref().unwrap().ends_with("a.parquet"));
+    // stored paths are relative to the workspace dir for portability
+    assert!(!Path::new(&a.path).is_absolute());
+    assert_eq!(a.path, "a.parquet");
+    assert_eq!(a.size, Some(p1.metadata().unwrap().len()));
+    assert!(loaded.table("gone").unwrap().missing);
+}
+
+#[test]
+fn workspace_cross_file_join_and_query() {
+    use super::catalog;
+
+    let dir = tempdir().unwrap();
+    let p1 = dir.path().join("sales.parquet");
+    let p2 = dir.path().join("regions.parquet");
+    write_keyed_parquet(&p1, 1, "north");
+    write_keyed_parquet(&p2, 1, "south");
+
+    let mut ws = catalog::Workspace::new("t");
+    ws.add_table("sales", p1.to_str().unwrap(), "file", "query");
+    ws.add_table("regions", p2.to_str().unwrap(), "file", "query");
+    ws.resolve_paths();
+
+    let engine = DuckDbEngine::open_workspace(&ws).unwrap();
+    assert!(!engine.has_editor());
+
+    let result = engine
+        .execute_sql("SELECT s.id, s.val, r.label FROM sales s JOIN regions r USING (id) ORDER BY s.id")
+        .unwrap();
+    assert_eq!(result.rows.len(), 2);
+    assert_eq!(result.rows[0].values[0], serde_json::json!(1));
+    assert_eq!(result.rows[0].values[1], serde_json::json!(100));
+    assert_eq!(result.rows[0].values[2], serde_json::json!("south"));
+    assert_eq!(result.rows[1].values[0], serde_json::json!(2));
+    assert_eq!(result.rows[1].values[2], serde_json::json!("south"));
+}
+
+#[test]
+fn workspace_export_table_and_meta_and_summarize() {
+    use super::catalog;
+
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("sample.parquet");
+    write_sample_parquet(&src);
+
+    let mut ws = catalog::Workspace::new("t");
+    ws.add_table("t", src.to_str().unwrap(), "file", "query");
+    ws.resolve_paths();
+    let engine = DuckDbEngine::open_workspace(&ws).unwrap();
+
+    // meta from footer
+    let meta = engine.get_table_meta(src.to_str().unwrap()).unwrap();
+    assert_eq!(meta["rows"], serde_json::json!(1022));
+    assert!(!meta["compression"].as_str().unwrap().is_empty());
+    assert!(meta["size_bytes"].as_i64().unwrap() > 0);
+
+    // summarize: schema + stats + sample
+    let sum = engine.summarize_table("t").unwrap();
+    assert_eq!(sum["columns"].as_array().unwrap().len(), 7);
+    assert_eq!(sum["stats"].as_array().unwrap().len(), 7);
+    assert_eq!(sum["sample"].as_array().unwrap().len(), 5);
+
+    // export with zstd, reopen, verify
+    let out = dir.path().join("exported.parquet");
+    engine
+        .export_table("t", out.to_str().unwrap(), "ZSTD")
+        .unwrap();
+    let reopened = DuckDbEngine::open_parquet(out.to_str().unwrap()).unwrap();
+    assert_eq!(reopened.row_count(), 1022);
+}
+
+#[test]
+fn workspace_editor_flow() {
+    use super::catalog;
+
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("sample.parquet");
+    write_sample_parquet(&src);
+
+    let mut ws = catalog::Workspace::new("t");
+    ws.add_table("t", src.to_str().unwrap(), "file", "editable");
+    ws.resolve_paths();
+    let mut engine = DuckDbEngine::open_workspace(&ws).unwrap();
+    assert!(!engine.has_editor());
+
+    engine
+        .open_editor_table("t", src.to_str().unwrap())
+        .unwrap();
+    assert!(engine.has_editor());
+
+    let columns = engine.column_info().unwrap();
+    engine
+        .edit_cell(1, 0, &serde_json::json!(999), &columns)
+        .unwrap();
+    assert_eq!(engine.get_all_rows().unwrap()[0].values[0], serde_json::json!(999));
+    engine.undo().unwrap();
+    assert_eq!(engine.get_all_rows().unwrap()[0].values[0], serde_json::json!(0));
+
+    engine.close_editor().unwrap();
+    assert!(!engine.has_editor());
+
+    // Editor-only ops fail cleanly with no table open
+    let err = engine.column_info().unwrap_err();
+    assert!(!err.is_empty());
+}

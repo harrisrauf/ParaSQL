@@ -1,3 +1,4 @@
+pub mod catalog;
 pub mod duckdb;
 pub mod types;
 #[cfg(test)]
