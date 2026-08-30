@@ -4,27 +4,18 @@
 
   let query = $state('');
   let debounceTimer: ReturnType<typeof setTimeout> | undefined;
-  let searchSeq = 0;
 
   function handleInput(e: Event) {
     const target = e.target as HTMLInputElement;
     query = target.value;
     clearTimeout(debounceTimer);
-    const seq = ++searchSeq;
     debounceTimer = setTimeout(() => {
-      searchFlow(query).then(() => {
-        // If the query changed while the search was in flight, re-run
-        if (seq !== searchSeq) {
-          clearTimeout(debounceTimer);
-          searchFlow(query);
-        }
-      });
-    }, 200);
+      searchFlow(query);
+    }, 250);
   }
 
   function handleClear() {
     clearTimeout(debounceTimer);
-    searchSeq++;
     query = '';
     searchFlow('');
   }
@@ -33,7 +24,10 @@
 </script>
 
 <div class="search-bar">
-  <span class="search-icon">🔍</span>
+  <svg viewBox="0 0 16 16" width="13" height="13" class="search-icon" aria-hidden="true">
+    <circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.5" />
+    <line x1="10.5" y1="10.5" x2="14" y2="14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
+  </svg>
   <input
     type="text"
     placeholder="Search..."
@@ -42,7 +36,12 @@
     class="search-input"
   />
   {#if query}
-    <button onclick={handleClear} class="clear-btn">✕</button>
+    <button onclick={handleClear} class="clear-btn" title="Clear search">
+      <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
+        <line x1="4" y1="4" x2="12" y2="12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+        <line x1="12" y1="4" x2="4" y2="12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+      </svg>
+    </button>
   {/if}
 </div>
 

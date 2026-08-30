@@ -50,11 +50,11 @@ export async function editCell(
   colIdx: number,
   value: string | number | boolean | null
 ): Promise<QueryResult> {
-  return invoke('edit_cell', { row_id: rowId, col_idx: colIdx, value });
+  return invoke('edit_cell', { rowId, colIdx, value });
 }
 
 export async function deleteRows(rowIds: number[]): Promise<void> {
-  return invoke('delete_rows', { row_ids: rowIds });
+  return invoke('delete_rows', { rowIds });
 }
 
 export async function insertRow(): Promise<QueryResult> {
@@ -70,7 +70,7 @@ export async function dropColumn(name: string): Promise<void> {
 }
 
 export async function renameColumn(oldName: string, newName: string): Promise<void> {
-  return invoke('rename_column', { old_name: oldName, new_name: newName });
+  return invoke('rename_column', { oldName, newName });
 }
 
 export async function executeSql(sql: string): Promise<QueryResult> {
@@ -78,7 +78,7 @@ export async function executeSql(sql: string): Promise<QueryResult> {
 }
 
 export async function sortBy(colName: string, ascending: boolean): Promise<RowData[]> {
-  return invoke('sort_by', { col_name: colName, ascending });
+  return invoke('sort_by', { colName, ascending });
 }
 
 export async function generateSchema(dialect: string = 'duckdb'): Promise<string> {

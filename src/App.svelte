@@ -17,6 +17,7 @@
     redoFlow,
     deleteSelectedFlow,
     copySelectionToClipboard,
+    copySelectionAsJson,
     copyValue,
     copyAsWhere,
     copyRowAsJson,
@@ -30,7 +31,8 @@
   // Context menu state
   let contextMenu = $state<{
     show: boolean; x: number; y: number; value: string; colName: string; row: RowData | null;
-  }>({ show: false, x: 0, y: 0, value: '', colName: '', row: null });
+    kind: 'cell' | 'row' | 'column';
+  }>({ show: false, x: 0, y: 0, value: '', colName: '', row: null, kind: 'cell' });
 
   function handleKeydown(e: KeyboardEvent) {
     // Don't hijack shortcuts while typing in inputs, editors, or selects
@@ -83,14 +85,28 @@
   }
 
   function handleContextMenu(e: MouseEvent) {
+    // Suppress the native webview context menu entirely
+    e.preventDefault();
     const target = e.target as HTMLElement;
     const cellValue = target.closest('.cell-value')?.textContent || '';
-    const colName = target.closest('.cell')?.getAttribute('data-col') || '';
+    const colEl = target.closest('.col-header') as HTMLElement | null;
+    const colName = target.closest('.cell')?.getAttribute('data-col') || colEl?.getAttribute('data-col') || '';
     const rowEl = target.closest('.grid-row') as HTMLElement | null;
     const rowId = rowEl ? Number(rowEl.dataset.row) : NaN;
     const row = Number.isNaN(rowId) ? null : $tableStore.rows.find(r => r.row_id === rowId) ?? null;
-    const menuW = 220;
-    const menuH = 130;
+    // Excel-style: right-clicking a row that isn't selected selects it first
+    if (row && !$selectedRowIds.has(row.row_id)) {
+      tableStore.selectRow(row.row_id);
+    }
+    const kind: 'cell' | 'row' | 'column' =
+      target.closest('.col-header') ? 'column' :
+      rowEl ? 'row' : 'cell';
+    if (!row && !cellValue && kind !== 'column') {
+      closeContextMenu();
+      return;
+    }
+    const menuW = 260;
+    const menuH = 240;
     contextMenu = {
       show: true,
       x: Math.min(e.clientX, window.innerWidth - menuW),
@@ -98,6 +114,7 @@
       value: cellValue,
       colName,
       row,
+      kind,
     };
   }
 
@@ -119,6 +136,36 @@
 
   async function handleCopyRowJson() {
     if (contextMenu.row) await copyRowAsJson(contextMenu.row);
+    closeContextMenu();
+  }
+
+  async function handleCopySelectionTsv() {
+    await copySelectionToClipboard();
+    closeContextMenu();
+  }
+
+  async function handleCopySelectionJson() {
+    await copySelectionAsJson();
+    closeContextMenu();
+  }
+
+  function handleSortColumn(direction: 'asc' | 'desc') {
+    if (contextMenu.colName) {
+      tableStore.update(s => ({ ...s, sort: { column: contextMenu.colName, direction } }));
+    }
+    closeContextMenu();
+  }
+
+  function handleClearSortMenu() {
+    tableStore.clearSort();
+    closeContextMenu();
+  }
+
+  async function handleDeleteRow() {
+    if (contextMenu.row) {
+      tableStore.selectRow(contextMenu.row.row_id);
+      await deleteSelectedFlow();
+    }
     closeContextMenu();
   }
 
@@ -191,10 +238,33 @@
       style="left: {contextMenu.x}px; top: {contextMenu.y}px;"
       onclick={(e) => e.stopPropagation()}
     >
-      <button onclick={handleCopyValue}>Copy value</button>
-      <button onclick={handleCopyAsWhere}>Copy as WHERE clause</button>
+      {#if contextMenu.kind === 'column'}
+        <button onclick={() => handleSortColumn('asc')}>Sort Ascending</button>
+        <button onclick={() => handleSortColumn('desc')}>Sort Descending</button>
+        <button onclick={handleClearSortMenu}>Clear Sort</button>
+        <div class="menu-sep"></div>
+      {/if}
+      {#if contextMenu.kind === 'row'}
+        <button onclick={handleDeleteRow}>Delete row</button>
+        <div class="menu-sep"></div>
+      {/if}
+      {#if contextMenu.value}
+        <button onclick={handleCopyValue}>Copy value</button>
+      {/if}
+      {#if contextMenu.colName && contextMenu.value}
+        <button onclick={handleCopyAsWhere}>Copy as WHERE clause</button>
+      {/if}
       {#if contextMenu.row}
         <button onclick={handleCopyRowJson}>Copy row as JSON</button>
+      {/if}
+      {#if selectedIds.size > 0}
+        <div class="menu-sep"></div>
+        <button onclick={handleCopySelectionTsv}>
+          Copy {selectedIds.size} selected {selectedIds.size === 1 ? 'row' : 'rows'} (TSV)
+        </button>
+        <button onclick={handleCopySelectionJson}>
+          Copy {selectedIds.size} selected {selectedIds.size === 1 ? 'row' : 'rows'} (JSON)
+        </button>
       {/if}
     </div>
   {/if}
@@ -335,5 +405,11 @@
 
   .context-menu button:hover {
     background: var(--hover-bg, #f0f0f0);
+  }
+
+  .menu-sep {
+    height: 1px;
+    margin: 4px 0;
+    background: var(--border-color, #e0e0e0);
   }
 </style>

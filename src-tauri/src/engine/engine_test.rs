@@ -394,3 +394,35 @@ fn insert_row_continues_patterns_without_scanning() {
     assert_eq!(row2.values[1], serde_json::json!("ID-0005"));
     assert_eq!(row2.values[3], serde_json::json!(5.5));
 }
+
+#[test]
+fn insert_row_does_not_guess_without_a_confirmed_pattern() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("noise.parquet");
+    let conn = duckdb::Connection::open_in_memory().unwrap();
+    let sql = r#"
+        CREATE TABLE t (noisy_int INT, noisy_float DOUBLE, seq INT, code VARCHAR);
+        INSERT INTO t VALUES
+          (5, 6.3, 10, 'A-10'),
+          (6, 6.5, 11, 'A-11'),
+          (1, 6.2, 12, 'A-12'),
+          (3, 5.9, 13, 'A-13'),
+          (8, 6.1, 14, 'A-14'),
+          (2, 6.4, 15, 'A-15'),
+          (9, 6.0, 16, 'A-16'),
+          (4, 5.7, 17, 'A-17');
+        COPY t TO '<path>' (FORMAT PARQUET);
+        "#
+    .replace("<path>", &path.to_str().unwrap().replace('\'', "''"));
+    conn.execute_batch(&sql).unwrap();
+
+    let mut engine = DuckDbEngine::open_parquet(path.to_str().unwrap()).unwrap();
+    let row = engine.insert_row().unwrap().rows[0].clone();
+
+    // No majority step in the noisy columns -> NULL (nullable), no guess
+    assert_eq!(row.values[0], serde_json::json!(null));
+    assert_eq!(row.values[1], serde_json::json!(null));
+    // Clean +1 sequences -> still continued
+    assert_eq!(row.values[2], serde_json::json!(18));
+    assert_eq!(row.values[3], serde_json::json!("A-18"));
+}

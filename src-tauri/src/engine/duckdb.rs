@@ -426,11 +426,12 @@ impl DuckDbEngine {
         let col_idents: Vec<String> = columns.iter().map(|c| quote_ident(&c.name)).collect();
 
         // Pattern-aware defaults: peek at the last few rows of each column and
-        // continue the observed sequence (constant step, or +1 fallback) instead
-        // of blanking the row. O(1) per column — no full-column scans.
+        // continue the observed sequence when a pattern is confirmed; otherwise
+        // NULL (or the plain type default for NOT NULL columns). O(1) per
+        // column — no full-column scans.
         let mut defaults = Vec::with_capacity(columns.len());
         for c in &columns {
-            defaults.push(self.next_default(&c.name, &c.dtype)?);
+            defaults.push(self.next_default(&c.name, &c.dtype, c.nullable)?);
         }
 
         // Materialize the row_id now so undo/redo are exact and deterministic
@@ -490,28 +491,53 @@ impl DuckDbEngine {
             .collect())
     }
 
-    /// Compute a pattern-aware SQL default literal for one column
-    fn next_default(&self, name: &str, dtype: &str) -> Result<String, String> {
-        let last3 = self.last_values(name, 3)?;
+    /// Compute a pattern-aware SQL default literal for one column. Only fills
+    /// when a pattern is confirmed by the window; otherwise NULL (or the plain
+    /// type default when the column is NOT NULL).
+    fn next_default(&self, name: &str, dtype: &str, nullable: bool) -> Result<String, String> {
+        let last8 = self.last_values(name, 8)?;
         let t = dtype.to_lowercase();
         let lit = if is_int_dtype(&t) {
-            next_int_default(&last3)
+            next_int_default(&last8)
         } else if is_float_dtype(&t) {
-            next_float_default(&last3)
+            next_float_default(&last8)
         } else if t.starts_with("date") {
-            next_date_default(&last3)
+            next_date_default(&last8)
         } else if t.starts_with("timestamp") {
-            next_timestamp_default(&last3)
+            next_timestamp_default(&last8)
         } else if t == "boolean" || t == "bool" {
-            last3
-                .iter()
-                .find_map(|v| v.as_bool())
-                .map(|b| if b { "TRUE" } else { "FALSE" }.to_string())
-                .unwrap_or_else(|| "FALSE".to_string())
+            let bools: Vec<bool> = last8.iter().filter_map(|v| v.as_bool()).collect();
+            if !bools.is_empty() && bools.iter().all(|&b| b == bools[0]) {
+                Some(if bools[0] { "TRUE" } else { "FALSE" }.to_string())
+            } else {
+                None
+            }
         } else if is_string_dtype(&t) {
-            next_string_default(&last3)
+            next_string_default(&last8)
         } else {
-            "NULL".to_string()
+            None
+        };
+        let lit = match lit {
+            Some(l) => l,
+            None if nullable => "NULL".to_string(),
+            None => {
+                // NOT NULL column: fall back to the plain type default
+                if is_int_dtype(&t) {
+                    "0".to_string()
+                } else if is_float_dtype(&t) {
+                    "0.0".to_string()
+                } else if t == "boolean" || t == "bool" {
+                    "FALSE".to_string()
+                } else if is_string_dtype(&t) {
+                    "''".to_string()
+                } else if t.starts_with("date") {
+                    "'1970-01-01'::DATE".to_string()
+                } else if t.starts_with("timestamp") {
+                    "'1970-01-01 00:00:00'::TIMESTAMP".to_string()
+                } else {
+                    "NULL".to_string()
+                }
+            }
         };
         Ok(lit)
     }
@@ -918,61 +944,92 @@ fn is_string_dtype(t: &str) -> bool {
     matches!(t, "varchar" | "utf8" | "text" | "string" | "char")
 }
 
-/// Integers: continue a constant step if confirmed by two consecutive steps,
-/// otherwise previous + 1.
-fn next_int_default(last3: &[JsonValue]) -> String {
-    let nums: Vec<i64> = last3.iter().filter_map(|v| v.as_i64()).collect();
-    match nums.as_slice() {
-        [] => "0".to_string(),
-        [n0] => (n0 + 1).to_string(),
-        [n0, n1, ..] => {
-            let step = n0 - n1;
-            if nums.len() >= 3 && (nums[1] - nums[2]) == step && step != 0 {
-                (n0 + step).to_string()
-            } else {
-                (n0 + 1).to_string()
-            }
-        }
+/// Integers: continue the dominant constant step across the window when it is
+/// confirmed by a strict majority of adjacent pairs (at least 3 values);
+/// otherwise None — never guess a fallback.
+fn next_int_default(values: &[JsonValue]) -> Option<String> {
+    let nums: Vec<i64> = values.iter().filter_map(|v| v.as_i64()).collect();
+    if nums.len() < 3 {
+        return None;
     }
+    let s = dominant_step(nums.iter().map(|&n| n as f64), |a, b| (a - b) as i64)?;
+    let mut candidate = nums[0] + s;
+    let mut guard = 0;
+    while nums.contains(&candidate) && guard < 1000 {
+        candidate += s;
+        guard += 1;
+    }
+    Some(candidate.to_string())
 }
 
-fn next_float_default(last3: &[JsonValue]) -> String {
-    let nums: Vec<f64> = last3.iter().filter_map(|v| v.as_f64()).collect();
-    match nums.as_slice() {
-        [] => "0.0".to_string(),
-        [n0] => (n0 + 1.0).to_string(),
-        [n0, n1, ..] => {
-            let step = n0 - n1;
-            if nums.len() >= 3 && (nums[1] - nums[2] - step).abs() < 1e-9 && step != 0.0 {
-                (n0 + step).to_string()
-            } else {
-                (n0 + 1.0).to_string()
-            }
-        }
+fn next_float_default(values: &[JsonValue]) -> Option<String> {
+    let nums: Vec<f64> = values.iter().filter_map(|v| v.as_f64()).collect();
+    if nums.len() < 3 {
+        return None;
     }
+    let s = dominant_step(
+        nums.iter().copied(),
+        |a, b| ((a - b) * 1_000_000.0).round() as i64,
+    )
+    .map(|q| q as f64 / 1_000_000.0)?;
+    let mut candidate = nums[0] + s;
+    let mut guard = 0;
+    while nums.iter().any(|n| (n - candidate).abs() < 1e-9) && guard < 1000 {
+        candidate += s;
+        guard += 1;
+    }
+    Some(candidate.to_string())
 }
 
-fn next_date_default(last3: &[JsonValue]) -> String {
-    let dates: Vec<NaiveDate> = last3
+/// Find the step that occurs most often between consecutive values (the values
+/// arrive newest-first, so steps are usually positive). Returns None on a tie
+/// or when no pair has a non-zero step.
+fn dominant_step<F, S>(values: impl Iterator<Item = f64>, step_of: F) -> Option<S>
+where
+    F: Fn(f64, f64) -> S,
+    S: PartialEq + Copy + std::hash::Hash + Eq,
+{
+    let nums: Vec<f64> = values.collect();
+    if nums.len() < 2 {
+        return None;
+    }
+    let mut counts: std::collections::HashMap<S, usize> = std::collections::HashMap::new();
+    for w in nums.windows(2) {
+        let s = step_of(w[0], w[1]);
+        if s != step_of(0.0, 0.0) {
+            *counts.entry(s).or_insert(0) += 1;
+        }
+    }
+    let pairs = nums.len() - 1;
+    counts
+        .into_iter()
+        .filter(|(_, c)| *c > pairs / 2)
+        .max_by_key(|(_, c)| *c)
+        .map(|(s, _)| s)
+}
+
+fn next_date_default(values: &[JsonValue]) -> Option<String> {
+    let dates: Vec<NaiveDate> = values
         .iter()
         .filter_map(|v| v.as_str())
         .filter_map(|s| NaiveDate::parse_from_str(s, "%Y-%m-%d").ok())
         .collect();
-    let one_day = ChronoDuration::days(1);
-    match dates.as_slice() {
-        [] => "NULL".to_string(),
-        [d0] => format!("'{}'::DATE", (*d0 + one_day).format("%Y-%m-%d")),
-        [d0, d1, ..] => {
-            let step = *d0 - *d1;
-            let next = if dates.len() >= 3 && (dates[1] - dates[2]) == step && step.num_days() != 0
-            {
-                *d0 + step
-            } else {
-                *d0 + one_day
-            };
-            format!("'{}'::DATE", next.format("%Y-%m-%d"))
-        }
+    if dates.len() < 3 {
+        return None;
     }
+    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+    let step = dominant_step(
+        dates.iter().map(|d| d.signed_duration_since(epoch).num_days() as f64),
+        |a, b| (a - b) as i64,
+    )
+    .map(ChronoDuration::days)?;
+    let mut candidate = dates[0] + step;
+    let mut guard = 0;
+    while dates.contains(&candidate) && guard < 1000 {
+        candidate = candidate + step;
+        guard += 1;
+    }
+    Some(format!("'{}'::DATE", candidate.format("%Y-%m-%d")))
 }
 
 fn parse_timestamp(s: &str) -> Option<NaiveDateTime> {
@@ -982,26 +1039,30 @@ fn parse_timestamp(s: &str) -> Option<NaiveDateTime> {
         .or_else(|| NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.3f").ok())
 }
 
-fn next_timestamp_default(last3: &[JsonValue]) -> String {
-    let ts: Vec<NaiveDateTime> = last3
+fn next_timestamp_default(values: &[JsonValue]) -> Option<String> {
+    let ts: Vec<NaiveDateTime> = values
         .iter()
         .filter_map(|v| v.as_str())
         .filter_map(parse_timestamp)
         .collect();
-    let one_day = ChronoDuration::days(1);
-    match ts.as_slice() {
-        [] => "NULL".to_string(),
-        [t0] => format!("'{}'::TIMESTAMP", (*t0 + one_day).format("%Y-%m-%d %H:%M:%S")),
-        [t0, t1, ..] => {
-            let step = *t0 - *t1;
-            let next = if ts.len() >= 3 && (ts[1] - ts[2]) == step && step.num_seconds() != 0 {
-                *t0 + step
-            } else {
-                *t0 + one_day
-            };
-            format!("'{}'::TIMESTAMP", next.format("%Y-%m-%d %H:%M:%S"))
-        }
+    if ts.len() < 3 {
+        return None;
     }
+    let step = dominant_step(
+        ts.iter().map(|t| t.and_utc().timestamp() as f64),
+        |a, b| (a - b) as i64,
+    )
+    .map(ChronoDuration::seconds)?;
+    let mut candidate = ts[0] + step;
+    let mut guard = 0;
+    while ts.contains(&candidate) && guard < 1000 {
+        candidate = candidate + step;
+        guard += 1;
+    }
+    Some(format!(
+        "'{}'::TIMESTAMP",
+        candidate.format("%Y-%m-%d %H:%M:%S")
+    ))
 }
 
 /// Split "ID-0003" into ("ID-", 3, 4). Returns None when there's no trailing number.
@@ -1018,22 +1079,46 @@ fn split_trailing_number(s: &str) -> Option<(&str, i64, usize)> {
     Some((&s[..i], num, s.len() - i))
 }
 
-/// Strings: continue a "prefix + zero-padded counter" convention when the last
-/// two values follow it (e.g. "ID-0001", "ID-0002" -> "ID-0003"), else blank.
-fn next_string_default(last3: &[JsonValue]) -> String {
-    let strs: Vec<&str> = last3.iter().filter_map(|v| v.as_str()).collect();
-    if strs.len() >= 2 {
+/// Strings: continue a "prefix + zero-padded counter" convention when most
+/// adjacent values follow it (e.g. "ID-0001", "ID-0002" -> "ID-0003"),
+/// skipping counters that already exist in the window; else None.
+fn next_string_default(values: &[JsonValue]) -> Option<String> {
+    let strs: Vec<&str> = values.iter().filter_map(|v| v.as_str()).collect();
+    let mut counts: std::collections::HashMap<(&str, usize), usize> = std::collections::HashMap::new();
+    for w in strs.windows(2) {
         if let (Some((pre0, num0, w0)), Some((pre1, num1, w1))) = (
-            split_trailing_number(strs[0]),
-            split_trailing_number(strs[1]),
+            split_trailing_number(w[0]),
+            split_trailing_number(w[1]),
         ) {
             if pre0 == pre1 && w0 == w1 && num1 == num0 - 1 {
-                let next = format!("{}{:0width$}", pre0, num0 + 1, width = w0);
-                return format!("'{}'", next.replace('\'', "''"));
+                *counts.entry((pre0, w0)).or_insert(0) += 1;
             }
         }
     }
-    "''".to_string()
+    let pairs = strs.len().saturating_sub(1);
+    let best = counts
+        .into_iter()
+        .filter(|(_, c)| pairs > 0 && *c > pairs / 2)
+        .max_by_key(|(_, c)| *c)
+        .map(|((pre, w), _)| (pre, w));
+    if let Some((pre, w)) = best {
+        let used: Vec<i64> = strs
+            .iter()
+            .filter_map(|s| split_trailing_number(s))
+            .filter(|(p, _, ww)| *p == pre && *ww == w)
+            .map(|(_, n, _)| n)
+            .collect();
+        let newest = used.first().copied().unwrap_or(0);
+        let mut candidate = newest + 1;
+        let mut guard = 0;
+        while used.contains(&candidate) && guard < 1000 {
+            candidate += 1;
+            guard += 1;
+        }
+        let next = format!("{}{:0width$}", pre, candidate, width = w);
+        return Some(format!("'{}'", next.replace('\'', "''")));
+    }
+    None
 }
 
 /// Map a DuckDB column type to the requested SQL dialect
