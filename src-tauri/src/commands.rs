@@ -318,10 +318,9 @@ pub async fn open_workspace(path: String, state: State<'_, AppState>) -> Result<
 }
 
 #[tauri::command]
-pub async fn save_workspace(path: String, ws: String, _state: State<'_, AppState>) -> Result<(), String> {
+pub async fn save_workspace(path: String, ws: catalog::Workspace, _state: State<'_, AppState>) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let mut doc: catalog::Workspace =
-            serde_json::from_str(&ws).map_err(|e| format!("Invalid workspace: {}", e))?;
+        let mut doc = ws;
         doc.dir = Some(workspace_dir(&path));
         doc.relativize_paths();
         catalog::write_workspace(&path, &doc)
@@ -333,13 +332,12 @@ pub async fn save_workspace(path: String, ws: String, _state: State<'_, AppState
 #[tauri::command]
 pub async fn sync_workspace_tables(
     path: String,
-    ws: String,
+    ws: catalog::Workspace,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let engine = state.engine.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let mut doc: catalog::Workspace =
-            serde_json::from_str(&ws).map_err(|e| format!("Invalid workspace: {}", e))?;
+        let mut doc = ws;
         doc.dir = Some(workspace_dir(&path));
         doc.resolve_paths();
         let mut eng = engine.lock().map_err(|e| format!("Lock error: {}", e))?;
@@ -356,13 +354,12 @@ pub async fn open_table_for_edit(
     name: String,
     path: String,
     force: bool,
-    ws: String,
+    ws: catalog::Workspace,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let engine = state.engine.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let doc: catalog::Workspace =
-            serde_json::from_str(&ws).map_err(|e| format!("Invalid workspace: {}", e))?;
+        let doc = ws;
         let size_mb = std::fs::metadata(&path)
             .map(|m| m.len() as f64 / (1024.0 * 1024.0))
             .unwrap_or(0.0);
