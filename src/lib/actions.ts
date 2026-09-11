@@ -362,14 +362,21 @@ export async function newWorkspaceFlow(): Promise<boolean> {
   if (!confirmDiscardChanges()) return false;
   const selected = await save({ filters: PARASQL_FILTER });
   if (!selected) return false;
-  const doc = emptyWorkspace(baseNameOf(selected));
-  await cmds.saveWorkspace(selected, doc);
-  const loaded = await cmds.openWorkspace(selected);
-  workspaceStore.set({
-    path: selected, doc: loaded, activeView: 'query', editorOpen: false,
-    metas: {}, loading: false, error: null,
-  });
-  return true;
+  try {
+    await cmds.closeEditor().catch(() => {});
+    const doc = emptyWorkspace(baseNameOf(selected));
+    await cmds.saveWorkspace(selected, doc);
+    const loaded = await cmds.openWorkspace(selected);
+    tableStore.open([], [], 0, null);
+    workspaceStore.set({
+      path: selected, doc: loaded, activeView: 'query', editorOpen: false,
+      metas: {}, loading: false, error: null,
+    });
+    return true;
+  } catch (e) {
+    console.error('Failed to create workspace:', e);
+    return false;
+  }
 }
 
 export async function openWorkspaceFlow(path?: string): Promise<boolean> {
@@ -381,12 +388,13 @@ export async function openWorkspaceFlow(path?: string): Promise<boolean> {
     selected = res;
   }
   try {
+    await cmds.closeEditor().catch(() => {});
     const doc = await cmds.openWorkspace(selected);
+    tableStore.open([], [], 0, null);
     workspaceStore.set({
       path: selected, doc, activeView: 'query', editorOpen: false,
       metas: {}, loading: false, error: null,
     });
-    tableStore.open([], [], 0, null);
     return true;
   } catch (e) {
     console.error('Failed to open workspace:', e);
@@ -464,11 +472,23 @@ export async function addFolderFlow(): Promise<boolean> {
     const files = await cmds.listParquetFiles(dir);
     if (files.length === 0) return false;
     const tables: WorkspaceTable[] = [...s.doc.tables];
+    const used = new Set(tables.map(t => t.name));
+    const uniqueName = (base: string): string => {
+      if (!used.has(base)) {
+        used.add(base);
+        return base;
+      }
+      let i = 2;
+      while (used.has(`${base}_${i}`)) i++;
+      const name = `${base}_${i}`;
+      used.add(name);
+      return name;
+    };
     const metas: Record<string, TableMeta> = { ...s.metas };
     for (const f of files) {
       const meta = await cmds.getTableMeta(f);
       tables.push({
-        name: uniqueTableName(s.doc, baseNameOf(f)),
+        name: uniqueName(baseNameOf(f)),
         path: f,
         source: 'file',
         mode: 'query',
@@ -570,10 +590,17 @@ export async function openEditorFlow(name: string): Promise<boolean> {
   const doc = s.doc;
   const table = doc?.tables.find(t => t.name === name);
   if (!table || !s.path || !doc) return false;
+
+  // Opening another editor discards unsaved edits in the current one.
+  if (s.editorOpen && get(tableStore).modified) {
+    if (!confirm('The open editor has unsaved changes. Discard them?')) return false;
+  }
+
   const path = table.abs_path ?? table.path;
   try {
     const res = await cmds.openTableForEdit(name, path, false, doc);
-    if (!res.opened && res.over_limit) {
+    if (!res.opened) {
+      if (!res.over_limit) return false;
       const ok = confirm(
         `"${name}" is ${res.size_mb} MB. Editing loads the full table into memory ` +
         'and saving rewrites the whole file. Open anyway?'
@@ -602,17 +629,33 @@ export async function closeEditorFlow(): Promise<void> {
   } catch {
     // no editor open is fine
   }
-  workspaceStore.update(v => ({ ...v, editorOpen: false }));
+  tableStore.open([], [], 0, null);
+  workspaceStore.update(v => ({ ...v, editorOpen: false, activeView: 'query' }));
 }
 
 export async function showEditorDataFlow(): Promise<void> {
   const s = get(workspaceStore);
   workspaceStore.update(v => ({ ...v, activeView: 'data' }));
-  if (s.editorOpen && s.doc && s.path && get(tableStore).sqlResult) {
-    const columns = await cmds.getColumns();
-    const rows = await cmds.getAllRows();
-    tableStore.open(columns, rows, rows.length, s.path);
-  }
+  if (!s.editorOpen || !get(tableStore).sqlResult) return;
+  // Restore the editor's own table (not the workspace file) and keep its
+  // dirty/saved state intact.
+  const [columns, rows, info] = await Promise.all([
+    cmds.getColumns(),
+    cmds.getAllRows(),
+    cmds.getFileInfo(),
+  ]);
+  tableStore.update(t => ({
+    ...t,
+    columns,
+    rows,
+    totalRows: info.rows ?? rows.length,
+    sqlResult: null,
+    savedTable: null,
+    filters: {},
+    selection: { anchor: null, cells: new Set(), allRows: false },
+    editable: true,
+    modified: info.modified,
+  }));
 }
 
 export async function summarizeTableFlow(name: string): Promise<TableSummary | null> {
