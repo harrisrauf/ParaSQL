@@ -18,6 +18,7 @@
   let filePath = $derived($tableStore.filePath);
   let totalRows = $derived($tableStore.totalRows);
   let modified = $derived($tableStore.modified);
+  let editable = $derived($tableStore.editable);
   let dialect = $derived($settings.schemaDialect);
 
   const COLUMN_TYPES = ['utf8', 'int64', 'int32', 'float64', 'float32', 'boolean'];
@@ -27,11 +28,16 @@
   }
 
   function startRename(col: string) {
+    if (!editable) return;
     renamingCol = col;
     renameValue = col;
   }
 
   async function finishRename() {
+    if (!editable) {
+      renamingCol = null;
+      return;
+    }
     if (renamingCol && renameValue && renameValue !== renamingCol) {
       try {
         await renameColumn(renamingCol, renameValue);
@@ -47,6 +53,7 @@
   }
 
   async function handleDrop(name: string) {
+    if (!editable) return;
     if (!confirm(`Delete column "${name}"? This can be undone.`)) return;
     try {
       await dropColumn(name);
@@ -60,7 +67,7 @@
   }
 
   async function handleAddColumn() {
-    if (!newColName) return;
+    if (!editable || !newColName) return;
     try {
       await addColumn(newColName, newColType);
       const [rows, cols] = await Promise.all([getAllRows(), getColumns()]);
@@ -136,7 +143,7 @@
                 </div>
               {/if}
               <span class="schema-col-type">{col.dtype}</span>
-              <button class="drop-btn" onclick={() => handleDrop(col.name)} title="Drop column">✕</button>
+              <button class="drop-btn" disabled={!editable} onclick={() => handleDrop(col.name)} title="Drop column">✕</button>
             </div>
           {/each}
         </div>
@@ -163,7 +170,7 @@
             <button class="cancel-btn" onclick={() => (addingColumn = false)}>Cancel</button>
           </div>
         {:else}
-          <button class="add-col-btn" onclick={() => (addingColumn = true)}>+ Add column</button>
+          <button class="add-col-btn" disabled={!editable} onclick={() => (addingColumn = true)}>+ Add column</button>
         {/if}
       </div>
     {:else if activeTab === 'query'}
@@ -320,9 +327,14 @@
     flex-shrink: 0;
   }
 
-  .drop-btn:hover {
+  .drop-btn:hover:not(:disabled) {
     background: #f5c6c6;
     color: #c0392b;
+  }
+
+  .drop-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
   }
 
   .add-col-btn {
@@ -336,9 +348,14 @@
     cursor: pointer;
   }
 
-  .add-col-btn:hover {
+  .add-col-btn:hover:not(:disabled) {
     color: var(--accent-color, #1a73e8);
     border-color: var(--accent-color, #1a73e8);
+  }
+
+  .add-col-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
   }
 
   .add-column {

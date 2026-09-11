@@ -21,9 +21,16 @@ function tsvQuote(s: string): string {
   return s;
 }
 
+/** Confirm discarding unsaved edits before replacing the loaded engine. */
+export function confirmDiscardChanges(): boolean {
+  if (!get(tableStore).modified) return true;
+  return confirm('You have unsaved changes. Discard them?');
+}
+
 // --- File flows ---
 
 export async function openFileFlow(path?: string): Promise<boolean> {
+  if (!confirmDiscardChanges()) return false;
   let selected = path;
   if (!selected) {
     const res = await open({
@@ -46,6 +53,7 @@ export async function openFileFlow(path?: string): Promise<boolean> {
 }
 
 export async function openFolderFlow(): Promise<boolean> {
+  if (!confirmDiscardChanges()) return false;
   const selected = await open({ directory: true, multiple: false });
   if (!selected) return false;
   const meta = await cmds.openFolder(selected);
@@ -107,9 +115,14 @@ export async function exportFlow(format: 'json' | 'csv' | 'excel'): Promise<bool
 // --- Edit flows ---
 
 export async function undoFlow(): Promise<void> {
+  if (!get(tableStore).editable) return;
   try {
     await cmds.undo();
-    const [rows, columns] = await Promise.all([cmds.getAllRows(), cmds.getColumns()]);
+    const [rows, columns, info] = await Promise.all([
+      cmds.getAllRows(),
+      cmds.getColumns(),
+      cmds.getFileInfo(),
+    ]);
     tableStore.update(s => ({
       ...s,
       rows,
@@ -118,6 +131,8 @@ export async function undoFlow(): Promise<void> {
       savedTable: null,
       selection: { anchor: null, cells: new Set(), allRows: false },
       filters: {},
+      editable: true,
+      modified: info.modified,
     }));
   } catch (err) {
     console.error('Failed to undo:', err);
@@ -125,9 +140,14 @@ export async function undoFlow(): Promise<void> {
 }
 
 export async function redoFlow(): Promise<void> {
+  if (!get(tableStore).editable) return;
   try {
     await cmds.redo();
-    const [rows, columns] = await Promise.all([cmds.getAllRows(), cmds.getColumns()]);
+    const [rows, columns, info] = await Promise.all([
+      cmds.getAllRows(),
+      cmds.getColumns(),
+      cmds.getFileInfo(),
+    ]);
     tableStore.update(s => ({
       ...s,
       rows,
@@ -136,6 +156,8 @@ export async function redoFlow(): Promise<void> {
       savedTable: null,
       selection: { anchor: null, cells: new Set(), allRows: false },
       filters: {},
+      editable: true,
+      modified: info.modified,
     }));
   } catch (err) {
     console.error('Failed to redo:', err);
@@ -143,6 +165,7 @@ export async function redoFlow(): Promise<void> {
 }
 
 export async function deleteSelectedFlow(): Promise<boolean> {
+  if (!get(tableStore).editable) return false;
   const ids = [...get(selectedRowIds)];
   if (ids.length === 0) return false;
   if (!confirm(`Delete ${ids.length} row(s)?`)) return false;
@@ -158,6 +181,7 @@ export async function deleteSelectedFlow(): Promise<boolean> {
 }
 
 export async function insertRowFlow(): Promise<void> {
+  if (!get(tableStore).editable) return;
   try {
     const result = await cmds.insertRow();
     const row = result.rows[0];
@@ -335,6 +359,7 @@ async function persist(doc: Workspace, path: string): Promise<Workspace> {
 }
 
 export async function newWorkspaceFlow(): Promise<boolean> {
+  if (!confirmDiscardChanges()) return false;
   const selected = await save({ filters: PARASQL_FILTER });
   if (!selected) return false;
   const doc = emptyWorkspace(baseNameOf(selected));
@@ -348,6 +373,7 @@ export async function newWorkspaceFlow(): Promise<boolean> {
 }
 
 export async function openWorkspaceFlow(path?: string): Promise<boolean> {
+  if (!confirmDiscardChanges()) return false;
   let selected = path;
   if (!selected) {
     const res = await open({ multiple: false, filters: PARASQL_FILTER });

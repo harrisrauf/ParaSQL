@@ -19,14 +19,28 @@ pub struct DuckDbEngine {
     redo_stack: Vec<UndoEntry>,
     /// Workspace view names we created (for safe teardown)
     created_views: Vec<String>,
+    /// True when the working table has unsaved mutations. Cleared on save.
+    dirty: bool,
 }
 
 /// Max undo steps kept in memory. Older entries are evicted (with cleanup).
 const UNDO_LIMIT: usize = 500;
 
-/// Index on _row_id. Dropped around column ALTERs because DuckDB blocks
-/// ALTER TABLE while catalog entries depend on it.
-const ROW_ID_INDEX: &str = "idx_working_rowid";
+/// Index on the internal row-id column. Dropped around column ALTERs because
+/// DuckDB blocks ALTER TABLE while catalog entries depend on it.
+const ROW_ID_INDEX: &str = "idx___pq_working_rowid";
+
+/// Reserved internal object names. The `__pq_` prefix prevents the editor's
+/// scratch objects from colliding with a user parquet file literally named
+/// "working" (or a user column named "_row_id").
+const WORKING_TABLE: &str = "__pq_working";
+const RAW_VIEW: &str = "__pq_raw";
+const ROW_ID_COL: &str = "__pq_row_id";
+
+/// True for names the engine reserves for its own working objects.
+fn is_reserved_name(name: &str) -> bool {
+    name == WORKING_TABLE || name == RAW_VIEW || name.starts_with("__pq_")
+}
 
 /// A recorded mutation: `redo_sql` re-applies it, `undo_sql` reverses it.
 /// DuckDB has no SAVEPOINT support, so undo is implemented by executing the
@@ -46,29 +60,37 @@ impl DuckDbEngine {
         // Load parquet file into a view
         let escaped = path.replace('\'', "''");
         conn.execute_batch(&format!(
-            "CREATE OR REPLACE VIEW raw_parquet AS SELECT * FROM read_parquet('{}')",
-            escaped
+            "CREATE OR REPLACE VIEW {} AS SELECT * FROM read_parquet('{}')",
+            RAW_VIEW, escaped
         ))
         .map_err(|e| format!("Failed to load parquet file: {}", e))?;
 
-        // Create working table with stable _row_id
-        conn.execute_batch(
-            "CREATE OR REPLACE TABLE working AS \
-             SELECT row_number() OVER () AS _row_id, t.* FROM raw_parquet t"
-        )
+        // Create working table with a stable internal row id
+        conn.execute_batch(&format!(
+            "CREATE OR REPLACE TABLE {} AS \
+             SELECT row_number() OVER () AS {}, t.* FROM {} t",
+            WORKING_TABLE, ROW_ID_COL, RAW_VIEW
+        ))
         .map_err(|e| format!("Failed to create working table: {}", e))?;
 
-        // Index _row_id: point edits/deletes/pagination become O(log n)
-        conn.execute_batch("CREATE INDEX idx_working_rowid ON working(_row_id)")
-            .map_err(|e| format!("Failed to index _row_id: {}", e))?;
+        // Index the row id: point edits/deletes/pagination become O(log n)
+        conn.execute_batch(&format!(
+            "CREATE INDEX {} ON {}({})",
+            ROW_ID_INDEX, WORKING_TABLE, ROW_ID_COL
+        ))
+        .map_err(|e| format!("Failed to index row id: {}", e))?;
 
         let row_count: i64 = conn
-            .query_row("SELECT count(*) FROM working", [], |row| row.get(0))
+            .query_row(
+                &format!("SELECT count(*) FROM {}", WORKING_TABLE),
+                [],
+                |row| row.get(0),
+            )
             .map_err(|e| format!("Failed to count rows: {}", e))?;
 
         Ok(Self {
             conn,
-            table_name: "working".to_string(),
+            table_name: WORKING_TABLE.to_string(),
             page_size: 500,
             file_metadata: Some(FileMetadata {
                 path: Some(std::path::PathBuf::from(path)),
@@ -79,6 +101,7 @@ impl DuckDbEngine {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             created_views: Vec::new(),
+            dirty: false,
         })
     }
 
@@ -90,29 +113,37 @@ impl DuckDbEngine {
         // Use DuckDB's glob to read all parquet files in the folder
         let glob_pattern = format!("{}/**/*.parquet", folder_path.replace('\'', "''"));
         conn.execute_batch(&format!(
-            "CREATE OR REPLACE VIEW raw_parquet AS SELECT * FROM read_parquet('{}')",
-            glob_pattern
+            "CREATE OR REPLACE VIEW {} AS SELECT * FROM read_parquet('{}')",
+            RAW_VIEW, glob_pattern
         ))
         .map_err(|e| format!("Failed to load parquet files from folder: {}", e))?;
 
-        // Create working table with stable _row_id
-        conn.execute_batch(
-            "CREATE OR REPLACE TABLE working AS \
-             SELECT row_number() OVER () AS _row_id, t.* FROM raw_parquet t"
-        )
+        // Create working table with a stable internal row id
+        conn.execute_batch(&format!(
+            "CREATE OR REPLACE TABLE {} AS \
+             SELECT row_number() OVER () AS {}, t.* FROM {} t",
+            WORKING_TABLE, ROW_ID_COL, RAW_VIEW
+        ))
         .map_err(|e| format!("Failed to create working table: {}", e))?;
 
-        // Index _row_id: point edits/deletes/pagination become O(log n)
-        conn.execute_batch("CREATE INDEX idx_working_rowid ON working(_row_id)")
-            .map_err(|e| format!("Failed to index _row_id: {}", e))?;
+        // Index the row id: point edits/deletes/pagination become O(log n)
+        conn.execute_batch(&format!(
+            "CREATE INDEX {} ON {}({})",
+            ROW_ID_INDEX, WORKING_TABLE, ROW_ID_COL
+        ))
+        .map_err(|e| format!("Failed to index row id: {}", e))?;
 
         let row_count: i64 = conn
-            .query_row("SELECT count(*) FROM working", [], |row| row.get(0))
+            .query_row(
+                &format!("SELECT count(*) FROM {}", WORKING_TABLE),
+                [],
+                |row| row.get(0),
+            )
             .map_err(|e| format!("Failed to count rows: {}", e))?;
 
         Ok(Self {
             conn,
-            table_name: "working".to_string(),
+            table_name: WORKING_TABLE.to_string(),
             page_size: 500,
             file_metadata: Some(FileMetadata {
                 path: Some(std::path::PathBuf::from(folder_path)),
@@ -123,6 +154,7 @@ impl DuckDbEngine {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             created_views: Vec::new(),
+            dirty: false,
         })
     }
 
@@ -130,8 +162,8 @@ impl DuckDbEngine {
     /// DuckDB refuses ALTER TABLE while catalog entries depend on the table.
     fn alter_without_index(&self, stmts: &str) -> String {
         format!(
-            "DROP INDEX IF EXISTS {}; {}; CREATE INDEX IF NOT EXISTS {} ON {}(_row_id)",
-            ROW_ID_INDEX, stmts, ROW_ID_INDEX, self.table_name
+            "DROP INDEX IF EXISTS {}; {}; CREATE INDEX IF NOT EXISTS {} ON {}({})",
+            ROW_ID_INDEX, stmts, ROW_ID_INDEX, self.table_name, ROW_ID_COL
         )
     }
 
@@ -140,6 +172,7 @@ impl DuckDbEngine {
     /// capped at UNDO_LIMIT; evicted entries run their cleanup SQL.
     fn push_undo(&mut self, redo_sql: String, undo_sql: String, cleanup_sql: Option<String>) {
         self.redo_stack.clear(); // New action invalidates redo history
+        self.dirty = true;
         if self.undo_stack.len() >= UNDO_LIMIT {
             let evicted = self.undo_stack.remove(0);
             if let Some(cleanup) = evicted.cleanup_sql {
@@ -210,8 +243,8 @@ impl DuckDbEngine {
 
         for row in rows {
             let (name, dtype, not_null) = row.map_err(|e| format!("Row error: {}", e))?;
-            // Skip the _row_id column from display
-            if name == "_row_id" {
+            // Skip the internal row-id column from display
+            if name == ROW_ID_COL {
                 continue;
             }
             columns.push(ColumnInfo {
@@ -227,8 +260,8 @@ impl DuckDbEngine {
     /// Get a page of rows as JSON
     pub fn get_page(&self, offset: usize, limit: usize) -> Result<Vec<RowData>, String> {
         let sql = format!(
-            "SELECT * FROM {} ORDER BY _row_id LIMIT {} OFFSET {}",
-            self.table_name, limit, offset
+            "SELECT * FROM {} ORDER BY {} LIMIT {} OFFSET {}",
+            self.table_name, ROW_ID_COL, limit, offset
         );
         let batch = self.query_to_batch(&sql)?;
         rows_from_batch(&batch, offset)
@@ -236,7 +269,10 @@ impl DuckDbEngine {
 
     /// Get all rows (for small datasets)
     pub fn get_all_rows(&self) -> Result<Vec<RowData>, String> {
-        let sql = format!("SELECT * FROM {} ORDER BY _row_id", self.table_name);
+        let sql = format!(
+            "SELECT * FROM {} ORDER BY {}",
+            self.table_name, ROW_ID_COL
+        );
         let batch = self.query_to_batch(&sql)?;
         rows_from_batch(&batch, 0)
     }
@@ -283,9 +319,10 @@ impl DuckDbEngine {
         };
 
         let sql = format!(
-            "SELECT * FROM {} WHERE {} ORDER BY _row_id LIMIT {}",
+            "SELECT * FROM {} WHERE {} ORDER BY {} LIMIT {}",
             self.table_name,
             cond,
+            ROW_ID_COL,
             Self::SEARCH_LIMIT + 1
         );
         let batch = self.query_to_batch_params(&sql, &params)?;
@@ -302,7 +339,7 @@ impl DuckDbEngine {
         let batch = self.query_to_batch(sql)?;
         let schema = batch.schema();
         let fields = schema.fields();
-        let skip = if !fields.is_empty() && fields[0].name() == "_row_id" { 1 } else { 0 };
+        let skip = if !fields.is_empty() && fields[0].name() == ROW_ID_COL { 1 } else { 0 };
         let columns = fields
             .iter()
             .enumerate()
@@ -326,8 +363,8 @@ impl DuckDbEngine {
 
         // Capture the current value so undo can restore it
         let select_sql = format!(
-            "SELECT * FROM {} WHERE _row_id = {}",
-            self.table_name, row_id
+            "SELECT * FROM {} WHERE {} = {}",
+            self.table_name, ROW_ID_COL, row_id
         );
         let batch = self.query_to_batch(&select_sql)?;
         let existing = rows_from_batch(&batch, 0)?;
@@ -340,24 +377,23 @@ impl DuckDbEngine {
         let old_literal = json_to_literal(&old_value)?;
 
         let sql = format!(
-            "UPDATE {} SET {} = {} WHERE _row_id = {}",
-            self.table_name, col_ident, new_literal, row_id
+            "UPDATE {} SET {} = {} WHERE {} = {}",
+            self.table_name, col_ident, new_literal, ROW_ID_COL, row_id
         );
         let inverse = format!(
-            "UPDATE {} SET {} = {} WHERE _row_id = {}",
-            self.table_name, col_ident, old_literal, row_id
+            "UPDATE {} SET {} = {} WHERE {} = {}",
+            self.table_name, col_ident, old_literal, ROW_ID_COL, row_id
         );
-
-        self.push_undo(sql.clone(), inverse, None);
 
         self.conn
             .execute_batch(&sql)
             .map_err(|e| format!("Failed to update cell: {}", e))?;
+        self.push_undo(sql, inverse, None);
 
         // Return the updated row
         let row_sql = format!(
-            "SELECT * FROM {} WHERE _row_id = {}",
-            self.table_name, row_id
+            "SELECT * FROM {} WHERE {} = {}",
+            self.table_name, ROW_ID_COL, row_id
         );
         let batch = self.query_to_batch(&row_sql)?;
         let rows = rows_from_batch(&batch, 0)?;
@@ -375,15 +411,17 @@ impl DuckDbEngine {
 
         let ids_str: Vec<String> = row_ids.iter().map(|id| id.to_string()).collect();
         let sql = format!(
-            "DELETE FROM {} WHERE _row_id IN ({})",
+            "DELETE FROM {} WHERE {} IN ({})",
             self.table_name,
+            ROW_ID_COL,
             ids_str.join(",")
         );
 
         // Capture the rows before deletion so undo can restore them
         let select_sql = format!(
-            "SELECT * FROM {} WHERE _row_id IN ({})",
+            "SELECT * FROM {} WHERE {} IN ({})",
             self.table_name,
+            ROW_ID_COL,
             ids_str.join(",")
         );
         let batch = self.query_to_batch(&select_sql)?;
@@ -406,17 +444,17 @@ impl DuckDbEngine {
             ));
         }
         let inverse = format!(
-            "INSERT INTO {} (_row_id, {}) VALUES {}",
+            "INSERT INTO {} ({}, {}) VALUES {}",
             self.table_name,
+            ROW_ID_COL,
             col_idents.join(", "),
             values_sql.join(", ")
         );
 
-        self.push_undo(sql.clone(), inverse, None);
-
         self.conn
             .execute_batch(&sql)
             .map_err(|e| format!("Failed to delete rows: {}", e))?;
+        self.push_undo(sql, inverse, None);
         Ok(())
     }
 
@@ -441,8 +479,8 @@ impl DuckDbEngine {
 
         // Materialize the row_id now so undo/redo are exact and deterministic
         let row_id_sql = format!(
-            "SELECT COALESCE(MAX(_row_id), 0) + 1 FROM {}",
-            self.table_name
+            "SELECT COALESCE(MAX({}), 0) + 1 FROM {}",
+            ROW_ID_COL, self.table_name
         );
         let new_row_id: i64 = self
             .conn
@@ -450,27 +488,27 @@ impl DuckDbEngine {
             .map_err(|e| format!("Failed to compute new row id: {}", e))?;
 
         let sql = format!(
-            "INSERT INTO {} (_row_id, {}) VALUES ({}, {})",
+            "INSERT INTO {} ({}, {}) VALUES ({}, {})",
             self.table_name,
+            ROW_ID_COL,
             col_idents.join(", "),
             new_row_id,
             defaults.join(", ")
         );
         let inverse = format!(
-            "DELETE FROM {} WHERE _row_id = {}",
-            self.table_name, new_row_id
+            "DELETE FROM {} WHERE {} = {}",
+            self.table_name, ROW_ID_COL, new_row_id
         );
-
-        self.push_undo(sql.clone(), inverse, None);
 
         self.conn
             .execute_batch(&sql)
             .map_err(|e| format!("Failed to insert row: {}", e))?;
+        self.push_undo(sql, inverse, None);
 
         // Fetch the inserted row (no RETURNING dependency)
         let row_sql = format!(
-            "SELECT * FROM {} WHERE _row_id = {}",
-            self.table_name, new_row_id
+            "SELECT * FROM {} WHERE {} = {}",
+            self.table_name, ROW_ID_COL, new_row_id
         );
         let batch = self.query_to_batch(&row_sql)?;
         let rows = rows_from_batch(&batch, 0)?;
@@ -483,9 +521,10 @@ impl DuckDbEngine {
     /// Last `n` values of a column, newest first (used for pattern detection)
     fn last_values(&self, col: &str, n: usize) -> Result<Vec<JsonValue>, String> {
         let sql = format!(
-            "SELECT {} FROM {} ORDER BY _row_id DESC LIMIT {}",
+            "SELECT {} FROM {} ORDER BY {} DESC LIMIT {}",
             quote_ident(col),
             self.table_name,
+            ROW_ID_COL,
             n
         );
         let batch = self.query_to_batch(&sql)?;
@@ -578,11 +617,10 @@ impl DuckDbEngine {
             quote_ident(name)
         ));
 
-        self.push_undo(sql.clone(), inverse, None);
-
         self.conn
             .execute_batch(&sql)
             .map_err(|e| format!("Failed to add column: {}", e))?;
+        self.push_undo(sql, inverse, None);
         Ok(())
     }
 
@@ -609,8 +647,8 @@ impl DuckDbEngine {
 
         // Capture the column values so undo can restore them exactly
         let capture_sql = format!(
-            "SELECT _row_id, {} FROM {}",
-            col_ident, self.table_name
+            "SELECT {}, {} FROM {}",
+            ROW_ID_COL, col_ident, self.table_name
         );
         let batch = self.query_to_batch(&capture_sql)?;
         let captured = rows_from_batch(&batch, 0)?;
@@ -628,8 +666,8 @@ impl DuckDbEngine {
         let sql = format!(
             "DROP INDEX IF EXISTS {}; \
              ALTER TABLE {} DROP COLUMN {}; \
-             CREATE INDEX IF NOT EXISTS {} ON {}(_row_id)",
-            ROW_ID_INDEX, self.table_name, col_ident, ROW_ID_INDEX, self.table_name
+             CREATE INDEX IF NOT EXISTS {} ON {}({})",
+            ROW_ID_INDEX, self.table_name, col_ident, ROW_ID_INDEX, self.table_name, ROW_ID_COL
         );
 
         let mut inverse = format!(
@@ -639,20 +677,20 @@ impl DuckDbEngine {
         );
         if !values_sql.is_empty() {
             inverse.push_str(&format!(
-                " UPDATE {} SET {} = v.{} FROM (VALUES {}) AS v(_row_id, {}) WHERE {}._row_id = v._row_id;",
-                self.table_name, col_ident, col_ident, values_sql.join(", "), col_ident, self.table_name
+                " UPDATE {} SET {} = v.{} FROM (VALUES {}) AS v({}, {}) WHERE {}.{} = v.{};",
+                self.table_name, col_ident, col_ident, values_sql.join(", "),
+                ROW_ID_COL, col_ident, self.table_name, ROW_ID_COL, ROW_ID_COL
             ));
         }
         inverse.push_str(&format!(
-            " CREATE INDEX IF NOT EXISTS {} ON {}(_row_id);",
-            ROW_ID_INDEX, self.table_name
+            " CREATE INDEX IF NOT EXISTS {} ON {}({});",
+            ROW_ID_INDEX, self.table_name, ROW_ID_COL
         ));
-
-        self.push_undo(sql.clone(), inverse, None);
 
         self.conn
             .execute_batch(&sql)
             .map_err(|e| format!("Failed to drop column: {}", e))?;
+        self.push_undo(sql, inverse, None);
         Ok(())
     }
 
@@ -671,11 +709,10 @@ impl DuckDbEngine {
             quote_ident(old_name)
         ));
 
-        self.push_undo(forward.clone(), inverse, None);
-
         self.conn
             .execute_batch(&forward)
             .map_err(|e| format!("Failed to rename column: {}", e))?;
+        self.push_undo(forward, inverse, None);
         Ok(())
     }
 
@@ -713,31 +750,35 @@ impl DuckDbEngine {
     fn export_select(&self) -> Result<String, String> {
         let columns = self.column_info()?;
         if columns.is_empty() {
-            return Ok(format!("SELECT * FROM {} ORDER BY _row_id", self.table_name));
+            return Ok(format!(
+                "SELECT * FROM {} ORDER BY {}",
+                self.table_name, ROW_ID_COL
+            ));
         }
         let cols: Vec<String> = columns
             .iter()
             .map(|c| format!("\"{}\"", c.name.replace('"', "\"\"")))
             .collect();
         Ok(format!(
-            "SELECT {} FROM {} ORDER BY _row_id",
+            "SELECT {} FROM {} ORDER BY {}",
             cols.join(", "),
-            self.table_name
+            self.table_name,
+            ROW_ID_COL
         ))
     }
 
-    /// Export to Parquet (native save format)
+    /// Export to Parquet (native save format).
+    /// Writes a sibling temp file and atomically replaces the target, so a
+    /// crash or disk-full mid-COPY can never truncate the original file.
     pub fn export_parquet(&self, path: &str) -> Result<(), String> {
-        let escaped = path.replace('\'', "''");
-        let sql = format!(
-            "COPY ({}) TO '{}' (FORMAT PARQUET)",
-            self.export_select()?,
-            escaped
-        );
-        self.conn
-            .execute_batch(&sql)
-            .map_err(|e| format!("Failed to export parquet: {}", e))?;
-        Ok(())
+        let select = self.export_select()?;
+        atomic_replace(path, |tmp| {
+            let escaped = tmp.replace('\'', "''");
+            let sql = format!("COPY ({}) TO '{}' (FORMAT PARQUET)", select, escaped);
+            self.conn
+                .execute_batch(&sql)
+                .map_err(|e| format!("Failed to export parquet: {}", e))
+        })
     }
 
     /// Export to JSON
@@ -820,28 +861,32 @@ impl DuckDbEngine {
         Ok(())
     }
 
-    /// Undo the last mutation by executing its inverse statement
+    /// Undo the last mutation by executing its inverse statement.
+    /// The history is only mutated after the inverse succeeds, so a failure
+    /// leaves the operation retryable instead of silently discarding it.
     pub fn undo(&mut self) -> Result<(), String> {
-        let entry = self.undo_stack.pop()
-            .ok_or_else(|| "Nothing to undo".to_string())?;
-
+        if self.undo_stack.is_empty() {
+            return Err("Nothing to undo".to_string());
+        }
+        let idx = self.undo_stack.len() - 1;
         self.conn
-            .execute_batch(&entry.undo_sql)
+            .execute_batch(&self.undo_stack[idx].undo_sql)
             .map_err(|e| format!("Failed to undo: {}", e))?;
-
+        let entry = self.undo_stack.pop().unwrap();
         self.redo_stack.push(entry);
         Ok(())
     }
 
-    /// Redo the last undone mutation by re-applying its forward statement
+    /// Redo the last undone mutation by re-applying its forward statement.
     pub fn redo(&mut self) -> Result<(), String> {
-        let entry = self.redo_stack.pop()
-            .ok_or_else(|| "Nothing to redo".to_string())?;
-
+        if self.redo_stack.is_empty() {
+            return Err("Nothing to redo".to_string());
+        }
+        let idx = self.redo_stack.len() - 1;
         self.conn
-            .execute_batch(&entry.redo_sql)
+            .execute_batch(&self.redo_stack[idx].redo_sql)
             .map_err(|e| format!("Failed to redo: {}", e))?;
-
+        let entry = self.redo_stack.pop().unwrap();
         self.undo_stack.push(entry);
         Ok(())
     }
@@ -854,6 +899,16 @@ impl DuckDbEngine {
     /// Check if redo is available
     pub fn can_redo(&self) -> bool {
         !self.redo_stack.is_empty()
+    }
+
+    /// True when the working table has unsaved mutations.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// Mark the current editor state as saved (after a successful write).
+    pub fn mark_clean(&mut self) {
+        self.dirty = false;
     }
 
     // --- Workspace mode (multi-file: each file is a table) ---
@@ -871,6 +926,7 @@ impl DuckDbEngine {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             created_views: Vec::new(),
+            dirty: false,
         };
         engine.sync_workspace_tables(ws)?;
         Ok(engine)
@@ -879,16 +935,36 @@ impl DuckDbEngine {
     /// (Re)create views for every table in the workspace; drop stale ones we
     /// created earlier.
     pub fn sync_workspace_tables(&mut self, ws: &catalog::Workspace) -> Result<(), String> {
-        let mut kept = Vec::new();
-        for name in std::mem::take(&mut self.created_views) {
-            if ws.tables.iter().any(|t| t.name == name) {
-                kept.push(name);
-            } else {
-                self.conn
-                    .execute_batch(&format!("DROP VIEW IF EXISTS {}", quote_ident(&name)))
-                    .map_err(|e| format!("Failed to drop view '{}': {}", name, e))?;
+        // Tables may not shadow the engine's reserved internal objects.
+        for t in &ws.tables {
+            if !t.missing && is_reserved_name(&t.name) {
+                return Err(format!(
+                    "Table name '{}' is reserved by the engine; please rename it",
+                    t.name
+                ));
             }
         }
+
+        // Drop views for tables removed from the workspace (or now missing),
+        // removing each from our bookkeeping as we go so a partial failure can
+        // never lose track of the views we created.
+        let stale: Vec<String> = self
+            .created_views
+            .iter()
+            .filter(|name| {
+                !ws.tables
+                    .iter()
+                    .any(|t| t.name == **name && !t.missing)
+            })
+            .map(|name| name.to_string())
+            .collect();
+        for name in stale {
+            self.conn
+                .execute_batch(&format!("DROP VIEW IF EXISTS {}", quote_ident(&name)))
+                .map_err(|e| format!("Failed to drop view '{}': {}", name, e))?;
+            self.created_views.retain(|n| n != &name);
+        }
+
         for t in &ws.tables {
             if t.missing {
                 continue;
@@ -902,11 +978,10 @@ impl DuckDbEngine {
                     escaped
                 ))
                 .map_err(|e| format!("Failed to create view '{}': {}", t.name, e))?;
-            if !kept.contains(&t.name) {
-                kept.push(t.name.clone());
+            if !self.created_views.contains(&t.name) {
+                self.created_views.push(t.name.clone());
             }
         }
-        self.created_views = kept;
         Ok(())
     }
 
@@ -915,25 +990,41 @@ impl DuckDbEngine {
         !self.table_name.is_empty()
     }
 
-    /// Materialize a workspace table into `working` for editing.
-    /// The existing mutation/undo machinery operates on `working`.
+    /// Materialize a workspace table into the working table for editing.
+    /// Builds the new table under a scratch name first, so a failure (missing
+    /// file, corrupt parquet, OOM) never destroys the currently-open editor.
     pub fn open_editor_table(&mut self, name: &str, abs_path: &str) -> Result<(), String> {
-        self.conn
-            .execute_batch("DROP INDEX IF EXISTS idx_working_rowid")
-            .map_err(|e| format!("Failed to reset editor: {}", e))?;
-        self.conn
-            .execute_batch("DROP TABLE IF EXISTS working")
-            .map_err(|e| format!("Failed to reset editor: {}", e))?;
+        const SCRATCH: &str = "__pq_working_new";
+        let _ = self
+            .conn
+            .execute_batch(&format!("DROP TABLE IF EXISTS {}", SCRATCH));
         self.conn
             .execute_batch(&format!(
-                "CREATE TABLE working AS SELECT row_number() OVER () AS _row_id, t.* FROM {} t",
+                "CREATE TABLE {} AS SELECT row_number() OVER () AS {}, t.* FROM {} t",
+                SCRATCH,
+                ROW_ID_COL,
                 quote_ident(name)
             ))
             .map_err(|e| format!("Failed to open table for editing: {}", e))?;
+
+        // Swap the fully-built scratch table into place only now.
         self.conn
-            .execute_batch("CREATE INDEX idx_working_rowid ON working(_row_id)")
-            .map_err(|e| format!("Failed to index _row_id: {}", e))?;
-        self.table_name = "working".to_string();
+            .execute_batch(&format!("DROP INDEX IF EXISTS {}", ROW_ID_INDEX))
+            .ok();
+        self.conn
+            .execute_batch(&format!("DROP TABLE IF EXISTS {}", WORKING_TABLE))
+            .map_err(|e| format!("Failed to reset editor: {}", e))?;
+        self.conn
+            .execute_batch(&format!("ALTER TABLE {} RENAME TO {}", SCRATCH, WORKING_TABLE))
+            .map_err(|e| format!("Failed to open table for editing: {}", e))?;
+        self.conn
+            .execute_batch(&format!(
+                "CREATE INDEX {} ON {}({})",
+                ROW_ID_INDEX, WORKING_TABLE, ROW_ID_COL
+            ))
+            .map_err(|e| format!("Failed to index row id: {}", e))?;
+
+        self.table_name = WORKING_TABLE.to_string();
         self.file_metadata = Some(FileMetadata {
             path: Some(std::path::PathBuf::from(abs_path)),
             compression: CompressionPreset::SNAPPY,
@@ -942,21 +1033,23 @@ impl DuckDbEngine {
         });
         self.undo_stack.clear();
         self.redo_stack.clear();
+        self.dirty = false;
         Ok(())
     }
 
-    /// Close the editor table (drop `working`), returning to query-only mode.
+    /// Close the editor table (drop the working table), returning to query-only mode.
     pub fn close_editor(&mut self) -> Result<(), String> {
         self.conn
-            .execute_batch("DROP INDEX IF EXISTS idx_working_rowid")
+            .execute_batch(&format!("DROP INDEX IF EXISTS {}", ROW_ID_INDEX))
             .map_err(|e| format!("Failed to close editor: {}", e))?;
         self.conn
-            .execute_batch("DROP TABLE IF EXISTS working")
+            .execute_batch(&format!("DROP TABLE IF EXISTS {}", WORKING_TABLE))
             .map_err(|e| format!("Failed to close editor: {}", e))?;
         self.table_name.clear();
         self.file_metadata = None;
         self.undo_stack.clear();
         self.redo_stack.clear();
+        self.dirty = false;
         Ok(())
     }
 
@@ -968,7 +1061,7 @@ impl DuckDbEngine {
         }
         let escaped = path.replace('\'', "''");
         let agg_sql = format!(
-            "SELECT COUNT(*) AS row_groups, SUM(row_group_num_rows) AS rows \
+            "SELECT COUNT(*) AS row_groups, COALESCE(SUM(row_group_num_rows), 0) AS rows \
              FROM (SELECT DISTINCT row_group_id, row_group_num_rows \
                    FROM parquet_metadata('{}'))",
             escaped
@@ -1008,17 +1101,18 @@ impl DuckDbEngine {
             "NONE" | "UNCOMPRESSED" => "UNCOMPRESSED",
             other => return Err(format!("Unsupported compression: {}", other)),
         };
-        let escaped = out_path.replace('\'', "''");
-        let sql = format!(
-            "COPY (SELECT * FROM {}) TO '{}' (FORMAT PARQUET, COMPRESSION {})",
-            quote_ident(name),
-            escaped,
-            comp
-        );
-        self.conn
-            .execute_batch(&sql)
-            .map_err(|e| format!("Failed to export table: {}", e))?;
-        Ok(())
+        atomic_replace(out_path, |tmp| {
+            let escaped = tmp.replace('\'', "''");
+            let sql = format!(
+                "COPY (SELECT * FROM {}) TO '{}' (FORMAT PARQUET, COMPRESSION {})",
+                quote_ident(name),
+                escaped,
+                comp
+            );
+            self.conn
+                .execute_batch(&sql)
+                .map_err(|e| format!("Failed to export table: {}", e))
+        })
     }
 
     /// Schema + SUMMARIZE stats + sample rows for a table (AI/analysis context).
@@ -1115,6 +1209,23 @@ impl DuckDbEngine {
 /// Doubles embedded double-quotes per SQL standard.
 fn quote_ident(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
+}
+
+/// Write to a sibling temp file, then atomically replace `path`. The original
+/// file is left untouched if the write fails (crash, disk full, bad SQL).
+fn atomic_replace<F>(path: &str, write: F) -> Result<(), String>
+where
+    F: FnOnce(&str) -> Result<(), String>,
+{
+    let tmp = format!("{}.tmp-{}", path, std::process::id());
+    if let Err(e) = write(&tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("Failed to replace '{}': {}", path, e)
+    })
 }
 
 /// Render a serde_json value as a SQL literal (values are always parameter-escaped).
@@ -1395,8 +1506,8 @@ pub fn rows_from_batch(batch: &RecordBatch, offset: usize) -> Result<Vec<RowData
             .collect());
     }
 
-    // Skip the internal _row_id column when present so values align 1:1 with display columns
-    let skip = if schema.field(0).name() == "_row_id" { 1 } else { 0 };
+    // Skip the internal row-id column when present so values align 1:1 with display columns
+    let skip = if schema.field(0).name() == ROW_ID_COL { 1 } else { 0 };
 
     let mut rows = Vec::with_capacity(num_rows);
     for row_idx in 0..num_rows {

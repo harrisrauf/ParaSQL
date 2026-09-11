@@ -24,6 +24,7 @@
   let modified = $derived($tableStore.modified);
   let selectedCount = $derived($selectedRowIds.size);
   let sidebarVisible = $derived($uiStore.sidebarVisible);
+  let editable = $derived($tableStore.editable);
 
   async function refreshUndoRedo() {
     const [u, r] = await Promise.all([canUndo(), canRedo()]);
@@ -82,13 +83,13 @@
   </div>
 
   <div class="toolbar-group">
-    <button class="tb-btn icon-btn" disabled={!undoAvail} title="Undo (Ctrl+Z)" onclick={() => runAction(() => undoFlow())}>
+    <button class="tb-btn icon-btn" disabled={!undoAvail || !editable} title="Undo (Ctrl+Z)" onclick={() => runAction(() => undoFlow())}>
       <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
         <path d="M6.5 4 3 7.5l3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
         <path d="M3 7.5h6.5a3.5 3.5 0 0 1 0 7H7" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
       </svg>
     </button>
-    <button class="tb-btn icon-btn" disabled={!redoAvail} title="Redo (Ctrl+Y)" onclick={() => runAction(() => redoFlow())}>
+    <button class="tb-btn icon-btn" disabled={!redoAvail || !editable} title="Redo (Ctrl+Y)" onclick={() => runAction(() => redoFlow())}>
       <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
         <path d="m9.5 4 3.5 3.5-3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
         <path d="M13 7.5H6.5a3.5 3.5 0 0 0 0 7H9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
@@ -97,8 +98,8 @@
   </div>
 
   <div class="toolbar-group">
-    <button class="tb-btn" disabled={!hasData} title="Insert Row" onclick={() => runAction(() => insertRowFlow())}>+ Row</button>
-    <button class="tb-btn" disabled={selectedCount === 0} title="Delete Selected Rows (Del)" onclick={() => runAction(() => deleteSelectedFlow())}>− Rows</button>
+    <button class="tb-btn" disabled={!hasData || !editable} title="Insert Row" onclick={() => runAction(() => insertRowFlow())}>+ Row</button>
+    <button class="tb-btn" disabled={selectedCount === 0 || !editable} title="Delete Selected Rows (Del)" onclick={() => runAction(() => deleteSelectedFlow())}>− Rows</button>
   </div>
 
   <div class="toolbar-group">
