@@ -1,5 +1,6 @@
 <script lang="ts">
 import { get } from 'svelte/store';
+import { onDestroy } from 'svelte';
 import { workspaceStore } from '../stores/workspace';
 import { tableStore } from '../stores/table';
 import * as a from '../actions';
@@ -28,13 +29,23 @@ function fmtSize(size: number | null): string {
   return `${(size / 1024 / 1024 / 1024).toFixed(2)} GB`;
 }
 
-async function handleTableClick(t: WorkspaceTable) {
+let clickTimer: ReturnType<typeof setTimeout> | undefined;
+onDestroy(() => clearTimeout(clickTimer));
+
+function handleTableClick(t: WorkspaceTable) {
   selectedTable = t.name;
   if (t.missing) return;
-  await a.runTableQueryFlow(t.name);
+  // Defer the single-click action so a double-click does not also fire a query.
+  clearTimeout(clickTimer);
+  clickTimer = setTimeout(() => {
+    clickTimer = undefined;
+    void a.runTableQueryFlow(t.name);
+  }, 220);
 }
 
 async function handleDoubleClick(t: WorkspaceTable) {
+  clearTimeout(clickTimer);
+  clickTimer = undefined;
   if (t.missing) return;
   await a.openEditorFlow(t.name);
 }
