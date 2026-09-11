@@ -27,7 +27,6 @@ pub fn run() {
             commands::drop_column,
             commands::rename_column,
             commands::execute_sql,
-            commands::sort_by,
             commands::generate_schema,
             commands::undo,
             commands::redo,

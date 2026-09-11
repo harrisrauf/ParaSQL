@@ -13,8 +13,7 @@
   "dependencies": {
     "@tanstack/svelte-virtual": "^3.13.0",
     "@tauri-apps/api": "^2.11.0",
-    "@tauri-apps/plugin-dialog": "^2.7.1",
-    "@tauri-apps/plugin-opener": "^2"
+    "@tauri-apps/plugin-dialog": "^2.7.1"
   },
   "devDependencies": {
     "@codemirror/lang-sql": "^6.10.0",

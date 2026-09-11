@@ -40,6 +40,7 @@ pub struct Workspace {
     pub dir: Option<String>,
 }
 
+#[allow(dead_code)]
 impl Workspace {
     pub fn new(name: &str) -> Self {
         Self {

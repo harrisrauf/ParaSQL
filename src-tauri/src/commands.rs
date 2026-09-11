@@ -125,9 +125,14 @@ pub async fn save_file(state: State<'_, AppState>) -> Result<(), String> {
         let path = engine
             .file_path()
             .ok_or_else(|| "No file path set".to_string())?
-            .to_string_lossy()
-            .to_string();
-        engine.export_parquet(&path)?;
+            .to_path_buf();
+        if path.is_dir() {
+            return Err(
+                "This view was opened from a folder; use Save As to write a parquet file."
+                    .to_string(),
+            );
+        }
+        engine.export_parquet(&path.to_string_lossy())?;
         engine.mark_clean();
         Ok(())
     })
@@ -169,11 +174,11 @@ pub async fn get_all_rows(state: State<'_, AppState>) -> Result<Vec<RowData>, St
 
 #[tauri::command]
 pub async fn get_page(
-    offset: usize,
+    after_id: Option<u64>,
     limit: usize,
     state: State<'_, AppState>,
 ) -> Result<Vec<RowData>, String> {
-    with_editor(state, move |engine| engine.get_page(offset, limit)).await
+    with_editor(state, move |engine| engine.get_page(after_id, limit)).await
 }
 
 #[tauri::command]
@@ -240,15 +245,6 @@ pub async fn rename_column(
 #[tauri::command]
 pub async fn execute_sql(sql: String, state: State<'_, AppState>) -> Result<QueryResult, String> {
     with_engine(state, move |engine| engine.execute_sql(&sql)).await
-}
-
-#[tauri::command]
-pub async fn sort_by(
-    col_name: String,
-    ascending: bool,
-    state: State<'_, AppState>,
-) -> Result<Vec<RowData>, String> {
-    with_editor(state, move |engine| engine.sort_by(&col_name, ascending)).await
 }
 
 #[tauri::command]
@@ -444,6 +440,10 @@ pub async fn list_parquet_files(dir: String) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
+/// DEV-only logging bridge for the webview console.
 pub fn debug_log(msg: String) {
+    #[cfg(debug_assertions)]
     println!("[webview] {}", msg);
+    #[cfg(not(debug_assertions))]
+    let _ = msg;
 }
