@@ -4,15 +4,26 @@ import { onDestroy } from 'svelte';
 import { workspaceStore } from '../stores/workspace';
 import { tableStore } from '../stores/table';
 import * as a from '../actions';
-import type { WorkspaceTable } from '../types';
+import type { WorkspaceTable, TableSummary } from '../types';
 
 let search = $state('');
 let selectedTable = $state<string | null>(null);
+let summary = $state<TableSummary | null>(null);
+
+let statKeys = $derived(
+  summary && summary.stats.length > 0 ? Object.keys(summary.stats[0]) : []
+);
+
+function fmtStat(v: unknown): string {
+  if (v == null) return '';
+  if (typeof v === 'object') return JSON.stringify(v);
+  return String(v);
+}
 
 let doc = $derived($workspaceStore.doc);
 let hasEditor = $derived($workspaceStore.editorOpen);
 let editorLabel = $derived(
-  hasEditor ? (get(tableStore).filePath?.split(/[\\/]/).pop() ?? 'editor') : null
+  hasEditor ? ($tableStore.filePath?.split(/[\\/]/).pop() ?? 'editor') : null
 );
 
 let filtered = $derived(
@@ -118,6 +129,14 @@ async function ctxExport() {
   closeCtx();
 }
 
+async function ctxSummarize() {
+  const t = ctx.table;
+  if (!t) return closeCtx();
+  closeCtx();
+  const res = await a.summarizeTableFlow(t.name);
+  if (res) summary = res;
+}
+
 async function ctxCloseEditor() {
   await a.closeEditorFlow();
   closeCtx();
@@ -193,6 +212,7 @@ async function ctxCloseEditor() {
       tabindex="-1"
       style="left: {ctx.x}px; top: {ctx.y}px;"
       onclick={(e) => e.stopPropagation()}
+      onkeydown={(e) => { if (e.key === 'Escape') closeCtx(); }}
     >
       <button role="menuitem" onclick={ctxQuery}>Query table</button>
       <button role="menuitem" onclick={ctxOpen}>Open for editing</button>
@@ -201,6 +221,7 @@ async function ctxCloseEditor() {
         {ctx.table.mode === 'editable' ? 'Mark query-only' : 'Mark editable'}
       </button>
       <button role="menuitem" onclick={ctxExport}>Export to parquet…</button>
+      <button role="menuitem" onclick={ctxSummarize}>Summarize…</button>
       <div class="sep"></div>
       <button role="menuitem" onclick={ctxRename}>Rename…</button>
       <button role="menuitem" onclick={ctxRemove}>Remove from workspace</button>
@@ -208,6 +229,34 @@ async function ctxCloseEditor() {
         <div class="sep"></div>
         <button role="menuitem" onclick={ctxCloseEditor}>Close editor</button>
       {/if}
+    </div>
+  {/if}
+
+  {#if summary}
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+    <div class="modal-backdrop" onclick={() => (summary = null)}>
+      <div class="modal" role="dialog" aria-label="Table summary">
+        <header class="modal-header">
+          <span class="modal-title">Summary: {summary.table}</span>
+          <button class="modal-close" onclick={() => (summary = null)} aria-label="Close">✕</button>
+        </header>
+        {#if statKeys.length > 0}
+          <div class="modal-body">
+            <table class="stats-table">
+              <thead>
+                <tr>{#each statKeys as k}<th>{k}</th>{/each}</tr>
+              </thead>
+              <tbody>
+                {#each summary.stats as row}
+                  <tr>{#each statKeys as k}<td>{fmtStat(row[k])}</td>{/each}</tr>
+                {/each}
+              </tbody>
+            </table>
+          </div>
+        {:else}
+          <div class="modal-body empty">No summary available.</div>
+        {/if}
+      </div>
     </div>
   {/if}
 </section>
@@ -389,5 +438,72 @@ async function ctxCloseEditor() {
     height: 1px;
     margin: 4px 6px;
     background: var(--border-color, #e0e0e0);
+  }
+
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.35);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1500;
+  }
+
+  .modal {
+    width: min(760px, 90vw);
+    max-height: 70vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--panel-bg, #fff);
+    border-radius: 8px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+    overflow: hidden;
+  }
+
+  .modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border-color, #e0e0e0);
+    font-weight: 600;
+  }
+
+  .modal-close {
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    font-size: 14px;
+    color: var(--text-secondary, #666);
+  }
+
+  .modal-body {
+    overflow: auto;
+    padding: 12px 14px;
+  }
+
+  .modal-body.empty {
+    color: var(--text-secondary, #666);
+  }
+
+  .stats-table {
+    border-collapse: collapse;
+    font-size: 12px;
+    width: 100%;
+  }
+
+  .stats-table th,
+  .stats-table td {
+    border: 1px solid var(--border-color, #e0e0e0);
+    padding: 4px 8px;
+    text-align: left;
+    white-space: nowrap;
+  }
+
+  .stats-table th {
+    background: var(--hover-bg, #f5f5f5);
+    position: sticky;
+    top: 0;
   }
 </style>

@@ -7,6 +7,7 @@
   import WorkspacePanel from './lib/components/WorkspacePanel.svelte';
   import WorkspaceMain from './lib/components/WorkspaceMain.svelte';
   import StatusBar from './lib/components/StatusBar.svelte';
+  import Toast from './lib/components/Toast.svelte';
   import { tableStore, selectedRowIds } from './lib/stores/table';
   import { workspaceStore } from './lib/stores/workspace';
   import { uiStore } from './lib/stores/ui';
@@ -53,6 +54,10 @@
       return;
     }
     const mod = e.ctrlKey || e.metaKey;
+    if (e.key === 'Escape') {
+      closeContextMenu();
+      return;
+    }
     // Undo: Ctrl+Z
     if (mod && e.key === 'z' && !e.shiftKey) {
       e.preventDefault();
@@ -285,6 +290,8 @@
     </div>
   {/if}
 </div>
+
+<Toast />
 
 <style>
   .app {

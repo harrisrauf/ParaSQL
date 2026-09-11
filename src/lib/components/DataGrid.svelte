@@ -7,6 +7,8 @@
   import { tableStore, displayedRows, selectedRowIds, allLoaded } from '../stores/table';
   import { settings } from '../stores/settings';
   import { editCell } from '../commands';
+  import { notify } from '../stores/ui';
+  import { tryBeginMutation, endMutation } from '../actions';
   import type { ColumnInfo, RowData } from '../types';
 
   const ROW_ID_W = 56;
@@ -182,6 +184,7 @@
   }
 
   async function handleSave(rowId: number, colIdx: number, value: string | number | boolean | null) {
+    if (!tryBeginMutation()) return;
     try {
       const result = await editCell(rowId, colIdx, value);
       if (result.rows.length > 0) {
@@ -189,10 +192,14 @@
         tableStore.updateRow(rowId, updatedRow);
         tableStore.update(s => ({ ...s, modified: true }));
       }
+      editingCell = null;
     } catch (err) {
       console.error('Failed to edit cell:', err);
+      notify(`Edit failed: ${err instanceof Error ? err.message : String(err)}`, 'error');
+      // Keep the editor open so the value can be corrected or cancelled.
+    } finally {
+      endMutation();
     }
-    editingCell = null;
   }
 
   // --- Keyboard navigation ---

@@ -33,11 +33,19 @@
   }
 
   onMount(() => {
+    refreshUndoRedo();
     const close = () => {
       dropdown = null;
     };
     document.addEventListener('click', close);
     return () => document.removeEventListener('click', close);
+  });
+
+  // Keep undo/redo availability in sync with engine-side state changes.
+  $effect(() => {
+    void $tableStore.rows;
+    void $tableStore.editable;
+    refreshUndoRedo();
   });
 
   function toggleDropdown(name: 'open' | 'export') {

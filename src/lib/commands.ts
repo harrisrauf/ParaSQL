@@ -36,8 +36,8 @@ export async function getAllRows(): Promise<RowData[]> {
   return invoke('get_all_rows');
 }
 
-export async function getPage(offset: number, limit: number): Promise<RowData[]> {
-  return invoke('get_page', { offset, limit });
+export async function getPage(afterId: number | null, limit: number): Promise<RowData[]> {
+  return invoke('get_page', { afterId, limit });
 }
 
 export async function searchRows(query: string, column: string | null = null): Promise<SearchResult> {
@@ -78,10 +78,6 @@ export async function renameColumn(oldName: string, newName: string): Promise<vo
 
 export async function executeSql(sql: string): Promise<QueryResult> {
   return invoke('execute_sql', { sql });
-}
-
-export async function sortBy(colName: string, ascending: boolean): Promise<RowData[]> {
-  return invoke('sort_by', { colName, ascending });
 }
 
 export async function generateSchema(dialect: string = 'duckdb'): Promise<string> {
