@@ -14,7 +14,10 @@
 
   function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Enter') save();
-    else if (e.key === 'Escape') onCancel();
+    else if (e.key === 'Escape') {
+      e.stopPropagation();
+      onCancel();
+    }
   }
 
   function save() {

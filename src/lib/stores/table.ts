@@ -104,6 +104,9 @@ function createTableStore() {
         filters: {},
         selection: emptySelection(),
         editable: false,
+        search: { query: '', column: null },
+        searchRows: null,
+        searchTruncated: false,
       };
     });
   }
@@ -242,7 +245,7 @@ function createTableStore() {
 
   function selectAll() {
     update(state => {
-      const base = state.searchRows ?? state.rows;
+      const base = visibleRows(state);
       const total = base.length * state.columns.length;
       if (total <= 100_000) {
         const cells = new Set<string>();
@@ -286,6 +289,15 @@ function createTableStore() {
     update(state => ({ ...state, filters: { ...state.filters, [colName]: values } }));
   }
 
+  function clearFilter(colName: string) {
+    update(state => {
+      if (!(colName in state.filters)) return state;
+      const filters = { ...state.filters };
+      delete filters[colName];
+      return { ...state, filters };
+    });
+  }
+
   function clearFilters() {
     update(state => ({ ...state, filters: {} }));
   }
@@ -303,7 +315,8 @@ function createTableStore() {
     if (state.sqlResult !== null || state.rows.length >= state.totalRows) return;
     update(s => ({ ...s, loadingMore: true }));
     try {
-      const page = await getPage(state.rows.length, LOAD_CHUNK);
+      const last = state.rows[state.rows.length - 1];
+      const page = await getPage(last ? last.row_id : null, LOAD_CHUNK);
       update(s => {
         if (page.length === 0) return { ...s, loadingMore: false };
         return { ...s, rows: [...s.rows, ...page], loadingMore: false };
@@ -345,6 +358,7 @@ function createTableStore() {
     setColumnWidth,
     toggleFilter,
     setFilter,
+    clearFilter,
     clearFilters,
     clearSort,
     loadMore,
@@ -357,26 +371,24 @@ export const initialLoadThreshold = INITIAL_LOAD_THRESHOLD;
 
 /** Row ids that have at least one selected cell (or all rows when select-all is active) */
 export const selectedRowIds = derived(tableStore, ($t) => {
-  let memo: { sel: SelectionState; rows: RowData[] | null; out: Set<number> } = {
+  let memo: { sel: SelectionState; base: RowData[] | null; out: Set<number> } = {
     sel: emptySelection(),
-    rows: null,
+    base: null,
     out: new Set(),
   };
-  return memoizedSelection($t);
-  function memoizedSelection($t: TableState): Set<number> {
-    if (memo.sel === $t.selection && memo.rows === $t.rows) return memo.out;
-    const s = new Set<number>();
-    if ($t.selection.allRows) {
-      for (const r of $t.rows) s.add(r.row_id);
-    } else {
-      for (const key of $t.selection.cells) {
-        const idx = key.indexOf(':');
-        s.add(Number(key.slice(0, idx)));
-      }
+  const base = $t.selection.allRows ? visibleRows($t) : null;
+  if (memo.sel === $t.selection && memo.base === base) return memo.out;
+  const s = new Set<number>();
+  if ($t.selection.allRows) {
+    for (const r of base!) s.add(r.row_id);
+  } else {
+    for (const key of $t.selection.cells) {
+      const idx = key.indexOf(':');
+      s.add(Number(key.slice(0, idx)));
     }
-    memo = { sel: $t.selection, rows: $t.rows, out: s };
-    return s;
   }
+  memo = { sel: $t.selection, base, out: s };
+  return s;
 });
 
 /** True when the engine's full result set is loaded (no more pages to fetch) */
@@ -410,71 +422,83 @@ export const displayedRows = derived(tableStore, ($table) => {
     sort: SortConfig | null;
     out: RowData[];
   } = { columns: null, rows: null, searchRows: null, filters: null, search: null, sort: null, out: [] };
-  return compute($table);
-  function compute($table: TableState): RowData[] {
-    const { columns, rows, searchRows, filters, search, sort } = $table;
-    if (memo.columns === columns && memo.rows === rows && memo.searchRows === searchRows && memo.filters === filters && memo.search === search && memo.sort === sort) {
-      return memo.out;
-    }
-    const colIdxOf = new Map(columns.map((c, i) => [c.name, i] as const));
+  if (memo.columns === $table.columns && memo.rows === $table.rows && memo.searchRows === $table.searchRows && memo.filters === $table.filters && memo.search === $table.search && memo.sort === $table.sort) {
+    return memo.out;
+  }
+  const out = visibleRows($table);
+  memo = {
+    columns: $table.columns,
+    rows: $table.rows,
+    searchRows: $table.searchRows,
+    filters: $table.filters,
+    search: $table.search,
+    sort: $table.sort,
+    out,
+  };
+  return out;
+});
 
-    let out = searchRows ?? rows;
+/** Apply search / filters / sort to the current row source (pure). */
+export function visibleRows($table: TableState): RowData[] {
+  const { columns, rows, searchRows, filters, search, sort } = $table;
+  const colIdxOf = new Map(columns.map((c, i) => [c.name, i] as const));
 
-    // Column filters (AND across columns)
-    const filterCols = columns.filter(c => filters[c.name]?.size > 0);
-    if (filterCols.length > 0) {
-      const filterDefs = filterCols.map(c => ({ idx: colIdxOf.get(c.name) ?? -1, set: filters[c.name]! }));
-      out = out.filter(r => {
-        for (const f of filterDefs) {
-          const v = r.values[f.idx];
-          const key = v === null || v === undefined ? null : String(v);
-          if (!f.set.has(key)) return false;
-        }
-        return true;
-      });
-    }
+  let out = searchRows ?? rows;
 
-    // Global / per-column search
-    if (search.query) {
-      const q = search.query.toLowerCase();
-      if (search.column) {
-        const colIdx = colIdxOf.get(search.column) ?? -1;
-        if (colIdx >= 0) {
-          out = out.filter(r => {
-            const val = r.values[colIdx];
-            return val !== null && String(val).toLowerCase().includes(q);
-          });
-        }
-      } else {
-        out = out.filter(r =>
-          r.values.some(v => v !== null && String(v).toLowerCase().includes(q))
-        );
+  // Column filters (AND across columns). Presence of a key means the filter
+  // is active; an empty set intentionally matches nothing.
+  const filterCols = columns.filter(c => filters[c.name] !== undefined);
+  if (filterCols.length > 0) {
+    const filterDefs = filterCols.map(c => ({ idx: colIdxOf.get(c.name) ?? -1, set: filters[c.name]! }));
+    out = out.filter(r => {
+      for (const f of filterDefs) {
+        const v = r.values[f.idx];
+        const key = v === null || v === undefined ? null : String(v);
+        if (!f.set.has(key)) return false;
       }
-    }
+      return true;
+    });
+  }
 
-    if (sort.direction && sort.column) {
-      const colIdx = colIdxOf.get(sort.column) ?? -1;
+  // Global / per-column search
+  if (search.query) {
+    const q = search.query.toLowerCase();
+    if (search.column) {
+      const colIdx = colIdxOf.get(search.column) ?? -1;
       if (colIdx >= 0) {
-        const dir = sort.direction;
-        out = [...out].sort((a, b) => {
-          const va = a.values[colIdx];
-          const vb = b.values[colIdx];
-          if (va === null && vb === null) return 0;
-          if (va === null) return 1;
-          if (vb === null) return -1;
-          if (typeof va === 'number' && typeof vb === 'number') {
-            return dir === 'asc' ? va - vb : vb - va;
-          }
-          const sa = String(va).toLowerCase();
-          const sb = String(vb).toLowerCase();
-          if (sa < sb) return dir === 'asc' ? -1 : 1;
-          if (sa > sb) return dir === 'asc' ? 1 : -1;
-          return 0;
+        out = out.filter(r => {
+          const val = r.values[colIdx];
+          return val !== null && String(val).toLowerCase().includes(q);
         });
       }
+    } else {
+      out = out.filter(r =>
+        r.values.some(v => v !== null && String(v).toLowerCase().includes(q))
+      );
     }
-
-    memo = { columns, rows, searchRows, filters, search, sort, out };
-    return out;
   }
-});
+
+  if (sort.direction && sort.column) {
+    const colIdx = colIdxOf.get(sort.column) ?? -1;
+    if (colIdx >= 0) {
+      const dir = sort.direction;
+      out = [...out].sort((a, b) => {
+        const va = a.values[colIdx];
+        const vb = b.values[colIdx];
+        if (va === null && vb === null) return 0;
+        if (va === null) return 1;
+        if (vb === null) return -1;
+        if (typeof va === 'number' && typeof vb === 'number') {
+          return dir === 'asc' ? va - vb : vb - va;
+        }
+        const sa = String(va).toLowerCase();
+        const sb = String(vb).toLowerCase();
+        if (sa < sb) return dir === 'asc' ? -1 : 1;
+        if (sa > sb) return dir === 'asc' ? 1 : -1;
+        return 0;
+      });
+    }
+  }
+
+  return out;
+}

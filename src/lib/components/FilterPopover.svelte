@@ -11,7 +11,10 @@
 
   let colIdx = $derived($tableStore.columns.findIndex(c => c.name === colName));
   let values = $derived(colIdx >= 0 ? distinctValues($tableStore.rows, colIdx) : []);
-  let selected = $derived($tableStore.filters[colName] ?? new Set<string | null>());
+  let filter = $derived($tableStore.filters[colName]);
+  let hasFilter = $derived(filter !== undefined);
+  // No explicit filter means "everything is selected".
+  let effective = $derived(hasFilter ? filter! : new Set(values));
   let search = $state('');
   let visibleValues = $derived(
     search
@@ -20,14 +23,21 @@
   );
 
   function toggle(v: string | null) {
-    const next = new Set(selected);
+    const next = new Set(effective);
     if (next.has(v)) next.delete(v);
     else next.add(v);
-    tableStore.setFilter(colName, next);
+    // Selecting everything removes the filter entirely.
+    if (next.size === values.length) tableStore.clearFilter(colName);
+    else tableStore.setFilter(colName, next);
   }
 
   function selectAll() {
-    tableStore.setFilter(colName, new Set(values));
+    tableStore.clearFilter(colName);
+  }
+
+  function clearFilter() {
+    tableStore.clearFilter(colName);
+    onClose();
   }
 
   function selectNone() {
@@ -62,17 +72,17 @@
   </div>
   <div class="filter-actions">
     <button onclick={selectAll}>Select all</button>
-    <button onclick={selectNone}>None</button>
-    <span class="filter-count">{selected.size} selected</span>
+    <button onclick={clearFilter}>Clear</button>
+    <span class="filter-count">{effective.size} of {values.length}</span>
   </div>
   <div class="filter-list">
     <label class="filter-option">
-      <input type="checkbox" checked={selected.has(null)} onchange={() => toggle(null)} />
+      <input type="checkbox" checked={effective.has(null)} onchange={() => toggle(null)} />
       <span class="null-opt">(null)</span>
     </label>
     {#each visibleValues.slice(0, 200) as v (v)}
       <label class="filter-option">
-        <input type="checkbox" checked={selected.has(v)} onchange={() => toggle(v)} />
+        <input type="checkbox" checked={effective.has(v)} onchange={() => toggle(v)} />
         <span class="value-opt">{v}</span>
       </label>
     {/each}

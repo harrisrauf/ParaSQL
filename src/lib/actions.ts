@@ -3,6 +3,7 @@ import { open, save } from '@tauri-apps/plugin-dialog';
 import * as cmds from './commands';
 import { tableStore, displayedRows, selectedRowIds, initialLoadThreshold } from './stores/table';
 import { settings } from './stores/settings';
+import { notify } from './stores/ui';
 import type { RowData } from './types';
 
 function pushRecent(path: string | null | undefined) {
@@ -21,10 +22,36 @@ function tsvQuote(s: string): string {
   return s;
 }
 
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+// --- Mutation re-entrancy ---
+let mutationBusy = false;
+
+/** Claim the mutation slot; returns false when a mutation is already running. */
+export function tryBeginMutation(): boolean {
+  if (mutationBusy) return false;
+  mutationBusy = true;
+  return true;
+}
+
+export function endMutation(): void {
+  mutationBusy = false;
+}
+
 /** Confirm discarding unsaved edits before replacing the loaded engine. */
 export function confirmDiscardChanges(): boolean {
   if (!get(tableStore).modified) return true;
   return confirm('You have unsaved changes. Discard them?');
+}
+
+async function writeClipboard(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch (err) {
+    notify(`Copy failed: ${errorMessage(err)}`, 'error');
+  }
 }
 
 // --- File flows ---
@@ -43,7 +70,7 @@ export async function openFileFlow(path?: string): Promise<boolean> {
   const meta = await cmds.openFile(selected);
   let rows: RowData[];
   if (meta.total_rows > initialLoadThreshold) {
-    rows = await cmds.getPage(0, 10_000);
+    rows = await cmds.getPage(null, 10_000);
   } else {
     rows = await cmds.getAllRows();
   }
@@ -59,7 +86,7 @@ export async function openFolderFlow(): Promise<boolean> {
   const meta = await cmds.openFolder(selected);
   let rows: RowData[];
   if (meta.total_rows > initialLoadThreshold) {
-    rows = await cmds.getPage(0, 10_000);
+    rows = await cmds.getPage(null, 10_000);
   } else {
     rows = await cmds.getAllRows();
   }
@@ -74,7 +101,14 @@ export async function saveFlow(): Promise<boolean> {
     tableStore.update(s => ({ ...s, modified: false }));
     return true;
   } catch (err) {
+    const msg = errorMessage(err);
+    // Folder-opened views have no single parquet target: fall back to Save As.
+    if (msg.includes('opened from a folder')) {
+      notify(msg, 'info');
+      return saveAsFlow();
+    }
     console.error('Failed to save:', err);
+    notify(`Save failed: ${msg}`, 'error');
     return false;
   }
 }
@@ -91,6 +125,7 @@ export async function saveAsFlow(): Promise<boolean> {
     return true;
   } catch (err) {
     console.error('Failed to save as:', err);
+    notify(`Save failed: ${errorMessage(err)}`, 'error');
     return false;
   }
 }
@@ -108,6 +143,7 @@ export async function exportFlow(format: 'json' | 'csv' | 'excel'): Promise<bool
     return true;
   } catch (err) {
     console.error(`Failed to export ${format}:`, err);
+    notify(`Export failed: ${errorMessage(err)}`, 'error');
     return false;
   }
 }
@@ -116,6 +152,7 @@ export async function exportFlow(format: 'json' | 'csv' | 'excel'): Promise<bool
 
 export async function undoFlow(): Promise<void> {
   if (!get(tableStore).editable) return;
+  if (!tryBeginMutation()) return;
   try {
     await cmds.undo();
     const [rows, columns, info] = await Promise.all([
@@ -136,11 +173,15 @@ export async function undoFlow(): Promise<void> {
     }));
   } catch (err) {
     console.error('Failed to undo:', err);
+    notify(`Undo failed: ${errorMessage(err)}`, 'error');
+  } finally {
+    endMutation();
   }
 }
 
 export async function redoFlow(): Promise<void> {
   if (!get(tableStore).editable) return;
+  if (!tryBeginMutation()) return;
   try {
     await cmds.redo();
     const [rows, columns, info] = await Promise.all([
@@ -161,6 +202,9 @@ export async function redoFlow(): Promise<void> {
     }));
   } catch (err) {
     console.error('Failed to redo:', err);
+    notify(`Redo failed: ${errorMessage(err)}`, 'error');
+  } finally {
+    endMutation();
   }
 }
 
@@ -169,6 +213,7 @@ export async function deleteSelectedFlow(): Promise<boolean> {
   const ids = [...get(selectedRowIds)];
   if (ids.length === 0) return false;
   if (!confirm(`Delete ${ids.length} row(s)?`)) return false;
+  if (!tryBeginMutation()) return false;
   try {
     await cmds.deleteRows(ids);
     tableStore.removeRows(ids);
@@ -176,12 +221,16 @@ export async function deleteSelectedFlow(): Promise<boolean> {
     return true;
   } catch (err) {
     console.error('Failed to delete rows:', err);
+    notify(`Delete failed: ${errorMessage(err)}`, 'error');
     return false;
+  } finally {
+    endMutation();
   }
 }
 
 export async function insertRowFlow(): Promise<void> {
   if (!get(tableStore).editable) return;
+  if (!tryBeginMutation()) return;
   try {
     const result = await cmds.insertRow();
     const row = result.rows[0];
@@ -196,14 +245,26 @@ export async function insertRowFlow(): Promise<void> {
     }
   } catch (err) {
     console.error('Failed to insert row:', err);
+    notify(`Insert failed: ${errorMessage(err)}`, 'error');
+  } finally {
+    endMutation();
   }
 }
 
 /** Whole-table search via the engine (matches unloaded rows too) */
 export async function searchFlow(query: string, column: string | null = null): Promise<void> {
   const q = query.trim();
+  const state = get(tableStore);
   if (!q) {
     tableStore.setSearch('', null);
+    tableStore.update(s => ({ ...s, searchRows: null, searchTruncated: false }));
+    return;
+  }
+  // Query results are already materialized and read-only: filter them here
+  // instead of round-tripping the engine.
+  if (state.sqlResult !== null) {
+    tableStore.setSearch(q, column);
+    tableStore.update(s => ({ ...s, searchRows: null, searchTruncated: false }));
     return;
   }
   try {
@@ -216,6 +277,7 @@ export async function searchFlow(query: string, column: string | null = null): P
     }));
   } catch (err) {
     console.error('Search failed:', err);
+    notify(`Search failed: ${errorMessage(err)}`, 'error');
   }
 }
 
@@ -229,7 +291,7 @@ export async function copySelectionToClipboard(): Promise<void> {
   if (state.selection.allRows) {
     const rows = get(displayedRows);
     const lines = rows.map(r => cols.map((_, i) => tsvQuote(cellText(r.values[i]))).join('\t'));
-    await navigator.clipboard.writeText(lines.join('\n'));
+    await writeClipboard(lines.join('\n'));
     return;
   }
 
@@ -265,11 +327,11 @@ export async function copySelectionToClipboard(): Promise<void> {
     }
     lines.push(cellsLine.join('\t'));
   }
-  await navigator.clipboard.writeText(lines.join('\n'));
+  await writeClipboard(lines.join('\n'));
 }
 
 export async function copyValue(value: string): Promise<void> {
-  await navigator.clipboard.writeText(value);
+  await writeClipboard(value);
 }
 
 /// JSON array of objects for the current selection (row-major, column-named),
@@ -303,12 +365,13 @@ export async function copySelectionAsJson(): Promise<void> {
     });
     return obj;
   });
-  await navigator.clipboard.writeText(JSON.stringify(objects, null, 2));
+  await writeClipboard(JSON.stringify(objects, null, 2));
 }
 
 export async function copyAsWhere(colName: string, value: string): Promise<void> {
+  const ident = `"${colName.replace(/"/g, '""')}"`;
   const escaped = value.replace(/'/g, "''");
-  await navigator.clipboard.writeText(`${colName} = '${escaped}'`);
+  await writeClipboard(`${ident} = '${escaped}'`);
 }
 
 export async function copyRowAsJson(row: RowData): Promise<void> {
@@ -317,7 +380,7 @@ export async function copyRowAsJson(row: RowData): Promise<void> {
   state.columns.forEach((c, i) => {
     obj[c.name] = row.values[i] ?? null;
   });
-  await navigator.clipboard.writeText(JSON.stringify(obj, null, 2));
+  await writeClipboard(JSON.stringify(obj, null, 2));
 }
 
 // --- Workspace flows ---
