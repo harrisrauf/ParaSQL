@@ -13,19 +13,22 @@ use super::types::*;
 pub struct DuckDbEngine {
     conn: Connection,
     table_name: String,
-    page_size: usize,
-    file_metadata: Option<FileMetadata>,
+    file_path: Option<std::path::PathBuf>,
     undo_stack: Vec<UndoEntry>,
     redo_stack: Vec<UndoEntry>,
     /// Workspace view names we created (for safe teardown)
     created_views: Vec<String>,
     /// True when the working table has unsaved mutations. Cleared on save.
     dirty: bool,
+    /// Monotonic counter for unique undo-snapshot temp table names.
+    undo_seq: usize,
 }
 
 /// Max undo steps kept in memory. Older entries are evicted (with cleanup).
 const UNDO_LIMIT: usize = 500;
 
+/// Row cap for free-form SQL results (one past the cap is fetched to detect it).
+const SQL_RESULT_LIMIT: usize = 100_000;
 /// Index on the internal row-id column. Dropped around column ALTERs because
 /// DuckDB blocks ALTER TABLE while catalog entries depend on it.
 const ROW_ID_INDEX: &str = "idx___pq_working_rowid";
@@ -36,6 +39,8 @@ const ROW_ID_INDEX: &str = "idx___pq_working_rowid";
 const WORKING_TABLE: &str = "__pq_working";
 const RAW_VIEW: &str = "__pq_raw";
 const ROW_ID_COL: &str = "__pq_row_id";
+/// Prefix for per-undo-entry row snapshot temp tables (type-faithful undo).
+const UNDO_TABLE_PREFIX: &str = "__pq_undo_";
 
 /// True for names the engine reserves for its own working objects.
 fn is_reserved_name(name: &str) -> bool {
@@ -80,28 +85,15 @@ impl DuckDbEngine {
         ))
         .map_err(|e| format!("Failed to index row id: {}", e))?;
 
-        let row_count: i64 = conn
-            .query_row(
-                &format!("SELECT count(*) FROM {}", WORKING_TABLE),
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|e| format!("Failed to count rows: {}", e))?;
-
         Ok(Self {
             conn,
             table_name: WORKING_TABLE.to_string(),
-            page_size: 500,
-            file_metadata: Some(FileMetadata {
-                path: Some(std::path::PathBuf::from(path)),
-                compression: CompressionPreset::SNAPPY,
-                row_group_size: row_count as usize,
-                data_page_size: None,
-            }),
+            file_path: Some(std::path::PathBuf::from(path)),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             created_views: Vec::new(),
             dirty: false,
+            undo_seq: 0,
         })
     }
 
@@ -133,28 +125,15 @@ impl DuckDbEngine {
         ))
         .map_err(|e| format!("Failed to index row id: {}", e))?;
 
-        let row_count: i64 = conn
-            .query_row(
-                &format!("SELECT count(*) FROM {}", WORKING_TABLE),
-                [],
-                |row| row.get(0),
-            )
-            .map_err(|e| format!("Failed to count rows: {}", e))?;
-
         Ok(Self {
             conn,
             table_name: WORKING_TABLE.to_string(),
-            page_size: 500,
-            file_metadata: Some(FileMetadata {
-                path: Some(std::path::PathBuf::from(folder_path)),
-                compression: CompressionPreset::SNAPPY,
-                row_group_size: row_count as usize,
-                data_page_size: None,
-            }),
+            file_path: Some(std::path::PathBuf::from(folder_path)),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             created_views: Vec::new(),
             dirty: false,
+            undo_seq: 0,
         })
     }
 
@@ -167,11 +146,47 @@ impl DuckDbEngine {
         )
     }
 
+    /// Snapshot the rows matching `where_sql` into a temp table so undo can
+    /// restore them with exact Arrow types (BLOB / LIST / timestamps included).
+    fn snapshot_rows(&mut self, where_sql: &str) -> Result<String, String> {
+        self.undo_seq += 1;
+        let name = format!("{}{}", UNDO_TABLE_PREFIX, self.undo_seq);
+        self.conn
+            .execute_batch(&format!(
+                "CREATE TEMP TABLE {} AS SELECT * FROM {} WHERE {}",
+                quote_ident(&name),
+                self.table_name,
+                where_sql
+            ))
+            .map_err(|e| format!("Failed to snapshot rows for undo: {}", e))?;
+        Ok(name)
+    }
+
+    /// Drop every snapshot/cleanup resource held by the history and clear it.
+    fn clear_history(&mut self) {
+        let entries: Vec<UndoEntry> = self
+            .undo_stack
+            .drain(..)
+            .chain(self.redo_stack.drain(..))
+            .collect();
+        for entry in entries {
+            if let Some(cleanup) = entry.cleanup_sql {
+                let _ = self.conn.execute_batch(&cleanup);
+            }
+        }
+    }
+
     /// Record a mutation for undo/redo. `redo_sql` re-applies it, `undo_sql`
     /// reverses it. New mutations invalidate the redo stack. The stack is
     /// capped at UNDO_LIMIT; evicted entries run their cleanup SQL.
     fn push_undo(&mut self, redo_sql: String, undo_sql: String, cleanup_sql: Option<String>) {
-        self.redo_stack.clear(); // New action invalidates redo history
+        // New action invalidates redo history; release its snapshots first.
+        let discarded: Vec<UndoEntry> = self.redo_stack.drain(..).collect();
+        for entry in discarded {
+            if let Some(cleanup) = entry.cleanup_sql {
+                let _ = self.conn.execute_batch(&cleanup);
+            }
+        }
         self.dirty = true;
         if self.undo_stack.len() >= UNDO_LIMIT {
             let evicted = self.undo_stack.remove(0);
@@ -193,32 +208,13 @@ impl DuckDbEngine {
         count as usize
     }
 
-    pub fn page_size(&self) -> usize {
-        self.page_size
-    }
-
-    pub fn set_page_size(&mut self, size: usize) {
-        self.page_size = size;
-    }
-
-    pub fn file_metadata(&self) -> Option<&FileMetadata> {
-        self.file_metadata.as_ref()
-    }
-
     pub fn file_path(&self) -> Option<&std::path::Path> {
-        self.file_metadata.as_ref().and_then(|m| m.path.as_deref())
+        self.file_path.as_deref()
     }
 
     /// Update the file path (e.g. after Save As)
     pub fn set_file_path(&mut self, path: &str) {
-        if let Some(md) = &mut self.file_metadata {
-            md.path = Some(std::path::PathBuf::from(path));
-        } else {
-            self.file_metadata = Some(FileMetadata {
-                path: Some(std::path::PathBuf::from(path)),
-                ..Default::default()
-            });
-        }
+        self.file_path = Some(std::path::PathBuf::from(path));
     }
 
     /// Get column info from DuckDB table
@@ -258,13 +254,20 @@ impl DuckDbEngine {
     }
 
     /// Get a page of rows as JSON
-    pub fn get_page(&self, offset: usize, limit: usize) -> Result<Vec<RowData>, String> {
+    /// Fetch a page of rows ordered by row id. Pass the last seen row id as
+    /// `after_id` (keyset pagination) so pages stay stable across edits and
+    /// deletes; pass None for the first page.
+    pub fn get_page(&self, after_id: Option<u64>, limit: usize) -> Result<Vec<RowData>, String> {
+        let where_sql = match after_id {
+            Some(id) => format!(" WHERE {} > {}", ROW_ID_COL, id),
+            None => String::new(),
+        };
         let sql = format!(
-            "SELECT * FROM {} ORDER BY {} LIMIT {} OFFSET {}",
-            self.table_name, ROW_ID_COL, limit, offset
+            "SELECT * FROM {}{} ORDER BY {} LIMIT {}",
+            self.table_name, where_sql, ROW_ID_COL, limit
         );
         let batch = self.query_to_batch(&sql)?;
-        rows_from_batch(&batch, offset)
+        rows_from_batch(&batch, 0)
     }
 
     /// Get all rows (for small datasets)
@@ -336,7 +339,50 @@ impl DuckDbEngine {
 
     /// Execute a raw SQL query and return results as rows
     pub fn execute_sql(&self, sql: &str) -> Result<QueryResult, String> {
-        let batch = self.query_to_batch(sql)?;
+        // Free-form queries are read-only: mutations here would bypass the
+        // undo history entirely, so only SELECT/WITH statements are allowed.
+        let trimmed = sql.trim();
+        // Ignore leading comments so "-- note\nSELECT ..." still works.
+        let mut stmt = trimmed;
+        loop {
+            if let Some(rest) = stmt.strip_prefix("--") {
+                stmt = rest
+                    .split_once('\n')
+                    .map(|(_, r)| r)
+                    .unwrap_or("")
+                    .trim_start();
+            } else if let Some(rest) = stmt.strip_prefix("/*") {
+                stmt = rest
+                    .split_once("*/")
+                    .map(|(_, r)| r)
+                    .unwrap_or("")
+                    .trim_start();
+            } else {
+                break;
+            }
+        }
+        let head = stmt[..stmt.len().min(24)].to_ascii_uppercase();
+        if !(head.starts_with("SELECT") || head.starts_with("WITH")) {
+            return Err(
+                "Only SELECT queries are allowed here. Open a table for editing to modify data."
+                    .to_string(),
+            );
+        }
+
+        // Cap materialization at one past the limit so we can detect overflow.
+        let capped = format!(
+            "SELECT * FROM ({}) AS __pq_query LIMIT {}",
+            stmt.trim_end_matches(';').trim_end(),
+            SQL_RESULT_LIMIT + 1
+        );
+        let batch = self.query_to_batch(&capped)?;
+        if batch.num_rows() > SQL_RESULT_LIMIT {
+            return Err(format!(
+                "Query returned more than {} rows — add a LIMIT to narrow the result.",
+                SQL_RESULT_LIMIT
+            ));
+        }
+
         let schema = batch.schema();
         let fields = schema.fields();
         let skip = if !fields.is_empty() && fields[0].name() == ROW_ID_COL { 1 } else { 0 };
@@ -361,34 +407,34 @@ impl DuckDbEngine {
             .ok_or_else(|| format!("Invalid column index: {}", col_idx))?;
         let col_ident = quote_ident(&col.name);
 
-        // Capture the current value so undo can restore it
-        let select_sql = format!(
-            "SELECT * FROM {} WHERE {} = {}",
-            self.table_name, ROW_ID_COL, row_id
-        );
-        let batch = self.query_to_batch(&select_sql)?;
-        let existing = rows_from_batch(&batch, 0)?;
-        let old_value = existing
-            .first()
-            .and_then(|r| r.values.get(col_idx).cloned())
-            .unwrap_or(JsonValue::Null);
+        // Snapshot the row so undo restores the exact prior value, including
+        // types that do not round-trip through JSON (BLOB, LIST, timestamps).
+        let snapshot = self.snapshot_rows(&format!("{} = {}", ROW_ID_COL, row_id))?;
+        let snap_ident = quote_ident(&snapshot);
+        let snap_col = quote_ident(&col.name);
 
         let new_literal = json_to_literal(value)?;
-        let old_literal = json_to_literal(&old_value)?;
 
         let sql = format!(
             "UPDATE {} SET {} = {} WHERE {} = {}",
             self.table_name, col_ident, new_literal, ROW_ID_COL, row_id
         );
         let inverse = format!(
-            "UPDATE {} SET {} = {} WHERE {} = {}",
-            self.table_name, col_ident, old_literal, ROW_ID_COL, row_id
+            "UPDATE {tbl} SET {col} = (SELECT {scol} FROM {snap} WHERE {snap}.{rid} = {tbl}.{rid}) WHERE {rid} = {row_id}",
+            tbl = self.table_name,
+            col = col_ident,
+            scol = snap_col,
+            snap = snap_ident,
+            rid = ROW_ID_COL,
+            row_id = row_id,
         );
+        let cleanup = format!("DROP TABLE IF EXISTS {}", snap_ident);
 
-        self.conn
-            .execute_batch(&sql)
-            .map_err(|e| format!("Failed to update cell: {}", e))?;
-        self.push_undo(sql, inverse, None);
+        if let Err(e) = self.conn.execute_batch(&sql) {
+            let _ = self.conn.execute_batch(&cleanup);
+            return Err(format!("Failed to update cell: {}", e));
+        }
+        self.push_undo(sql, inverse, Some(cleanup));
 
         // Return the updated row
         let row_sql = format!(
@@ -417,44 +463,20 @@ impl DuckDbEngine {
             ids_str.join(",")
         );
 
-        // Capture the rows before deletion so undo can restore them
-        let select_sql = format!(
-            "SELECT * FROM {} WHERE {} IN ({})",
-            self.table_name,
-            ROW_ID_COL,
-            ids_str.join(",")
-        );
-        let batch = self.query_to_batch(&select_sql)?;
-        let doomed = rows_from_batch(&batch, 0)?;
-
-        let columns = self.column_info()?;
-        let col_idents: Vec<String> = columns.iter().map(|c| quote_ident(&c.name)).collect();
-        let mut values_sql: Vec<String> = Vec::new();
-        for r in &doomed {
-            let literals: Result<Vec<String>, String> = r
-                .values
-                .iter()
-                .map(json_to_literal)
-                .collect();
-            let literals = literals?;
-            values_sql.push(format!(
-                "({}, {})",
-                r.row_id,
-                literals.join(", ")
-            ));
-        }
+        // Snapshot the doomed rows so undo restores them with exact Arrow types.
+        let snapshot = self.snapshot_rows(&format!("{} IN ({})", ROW_ID_COL, ids_str.join(",")))?;
+        let snap_ident = quote_ident(&snapshot);
         let inverse = format!(
-            "INSERT INTO {} ({}, {}) VALUES {}",
-            self.table_name,
-            ROW_ID_COL,
-            col_idents.join(", "),
-            values_sql.join(", ")
+            "INSERT INTO {} SELECT * FROM {}",
+            self.table_name, snap_ident
         );
+        let cleanup = format!("DROP TABLE IF EXISTS {}", snap_ident);
 
-        self.conn
-            .execute_batch(&sql)
-            .map_err(|e| format!("Failed to delete rows: {}", e))?;
-        self.push_undo(sql, inverse, None);
+        if let Err(e) = self.conn.execute_batch(&sql) {
+            let _ = self.conn.execute_batch(&cleanup);
+            return Err(format!("Failed to delete rows: {}", e));
+        }
+        self.push_undo(sql, inverse, Some(cleanup));
         Ok(())
     }
 
@@ -696,6 +718,15 @@ impl DuckDbEngine {
 
     /// Rename a column
     pub fn rename_column(&mut self, old_name: &str, new_name: &str) -> Result<(), String> {
+        if is_reserved_name(new_name) {
+            return Err(format!(
+                "Column name '{}' is reserved by the engine; please choose another name",
+                new_name
+            ));
+        }
+        if new_name != old_name && self.column_info()?.iter().any(|c| c.name == new_name) {
+            return Err(format!("A column named '{}' already exists", new_name));
+        }
         let forward = self.alter_without_index(&format!(
             "ALTER TABLE {} RENAME COLUMN {} TO {}",
             self.table_name,
@@ -732,18 +763,6 @@ impl DuckDbEngine {
             self.table_name,
             col_defs.join(",\n")
         ))
-    }
-
-    /// Sort rows by a column
-    pub fn sort_by(&self, col_name: &str, ascending: bool) -> Result<Vec<RowData>, String> {
-        let dir = if ascending { "ASC" } else { "DESC" };
-        let escaped = col_name.replace('"', "\"\"");
-        let sql = format!(
-            "SELECT * FROM {} ORDER BY \"{}\" {} NULLS LAST",
-            self.table_name, escaped, dir
-        );
-        let batch = self.query_to_batch(&sql)?;
-        rows_from_batch(&batch, 0)
     }
 
     /// Build a SELECT that excludes the internal _row_id column, preserving row order
@@ -817,6 +836,19 @@ impl DuckDbEngine {
 
         let mut workbook = rust_xlsxwriter::Workbook::new();
         let worksheet = workbook.add_worksheet();
+
+        if num_cols > 16_384 {
+            return Err(format!(
+                "Excel supports at most 16,384 columns; this table has {}.",
+                num_cols
+            ));
+        }
+        if batch.num_rows() > 1_048_575 {
+            return Err(format!(
+                "Excel supports at most 1,048,576 rows including the header; this table has {}.",
+                batch.num_rows()
+            ));
+        }
 
         for (col, field) in schema.fields().iter().enumerate() {
             worksheet
@@ -901,6 +933,18 @@ impl DuckDbEngine {
         !self.redo_stack.is_empty()
     }
 
+    /// Number of live undo snapshot tables (test-only visibility).
+    #[cfg(test)]
+    pub(crate) fn undo_snapshot_count(&self) -> i64 {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM duckdb_tables() WHERE table_name LIKE '__pq_undo_%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0)
+    }
+
     /// True when the working table has unsaved mutations.
     pub fn is_dirty(&self) -> bool {
         self.dirty
@@ -921,12 +965,12 @@ impl DuckDbEngine {
         let mut engine = Self {
             conn,
             table_name: String::new(),
-            page_size: 500,
-            file_metadata: None,
+            file_path: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             created_views: Vec::new(),
             dirty: false,
+            undo_seq: 0,
         };
         engine.sync_workspace_tables(ws)?;
         Ok(engine)
@@ -1025,14 +1069,8 @@ impl DuckDbEngine {
             .map_err(|e| format!("Failed to index row id: {}", e))?;
 
         self.table_name = WORKING_TABLE.to_string();
-        self.file_metadata = Some(FileMetadata {
-            path: Some(std::path::PathBuf::from(abs_path)),
-            compression: CompressionPreset::SNAPPY,
-            row_group_size: 0,
-            data_page_size: None,
-        });
-        self.undo_stack.clear();
-        self.redo_stack.clear();
+        self.file_path = Some(std::path::PathBuf::from(abs_path));
+        self.clear_history();
         self.dirty = false;
         Ok(())
     }
@@ -1046,9 +1084,8 @@ impl DuckDbEngine {
             .execute_batch(&format!("DROP TABLE IF EXISTS {}", WORKING_TABLE))
             .map_err(|e| format!("Failed to close editor: {}", e))?;
         self.table_name.clear();
-        self.file_metadata = None;
-        self.undo_stack.clear();
-        self.redo_stack.clear();
+        self.file_path = None;
+        self.clear_history();
         self.dirty = false;
         Ok(())
     }
@@ -1363,10 +1400,11 @@ fn next_date_default(values: &[JsonValue]) -> Option<String> {
 }
 
 fn parse_timestamp(s: &str) -> Option<NaiveDateTime> {
-    NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.3f")
+    NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f")
         .ok()
         .or_else(|| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok())
-        .or_else(|| NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.3f").ok())
+        .or_else(|| NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f").ok())
+        .or_else(|| NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").ok())
 }
 
 fn next_timestamp_default(values: &[JsonValue]) -> Option<String> {
@@ -1601,22 +1639,24 @@ pub fn arrow_array_to_json(array: &dyn Array, row_idx: usize) -> JsonValue {
     }
     if let Some(arr) = array.as_any().downcast_ref::<TimestampMicrosecondArray>() {
         let us = arr.value(row_idx);
-        let ms = us / 1000;
-        if let Some(dt) = chrono::DateTime::from_timestamp_millis(ms) {
-            return JsonValue::String(dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string());
+        let secs = us.div_euclid(1_000_000);
+        let nanos = (us.rem_euclid(1_000_000) * 1_000) as u32;
+        if let Some(dt) = chrono::DateTime::from_timestamp(secs, nanos) {
+            return JsonValue::String(dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string());
         }
     }
     if let Some(arr) = array.as_any().downcast_ref::<TimestampNanosecondArray>() {
         let ns = arr.value(row_idx);
-        let ms = ns / 1_000_000;
-        if let Some(dt) = chrono::DateTime::from_timestamp_millis(ms) {
-            return JsonValue::String(dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string());
+        let secs = ns.div_euclid(1_000_000_000);
+        let nanos = ns.rem_euclid(1_000_000_000) as u32;
+        if let Some(dt) = chrono::DateTime::from_timestamp(secs, nanos) {
+            return JsonValue::String(dt.format("%Y-%m-%d %H:%M:%S%.9f").to_string());
         }
     }
     if let Some(arr) = array.as_any().downcast_ref::<TimestampSecondArray>() {
         let s = arr.value(row_idx);
         if let Some(dt) = chrono::DateTime::from_timestamp(s, 0) {
-            return JsonValue::String(dt.format("%Y-%m-%d %H:%M:%S%.3f").to_string());
+            return JsonValue::String(dt.format("%Y-%m-%d %H:%M:%S").to_string());
         }
     }
 

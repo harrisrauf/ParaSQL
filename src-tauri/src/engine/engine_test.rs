@@ -60,7 +60,7 @@ fn engine_page_loading_and_schema_dialects() {
 
     let engine = DuckDbEngine::open_parquet(path.to_str().unwrap()).unwrap();
 
-    let page = engine.get_page(1000, 100).unwrap();
+    let page = engine.get_page(Some(1000), 100).unwrap();
     assert_eq!(page.len(), 22);
     assert_eq!(page[0].row_id, 1001);
 
@@ -380,10 +380,10 @@ fn insert_row_continues_patterns_without_scanning() {
     assert_eq!(row.values[0], serde_json::json!(4));
     // varchar: "prefix + zero-padded counter" convention -> ID-0004
     assert_eq!(row.values[1], serde_json::json!("ID-0004"));
-    // timestamp: constant 60s step -> +1 minute
+    // timestamp: constant 60s step -> +1 minute (parquet stores microseconds)
     assert_eq!(
         row.values[2],
-        serde_json::json!("2024-01-01 00:03:00.000")
+        serde_json::json!("2024-01-01 00:03:00.000000")
     );
     // float: constant +1.0 step -> 4.5
     assert_eq!(row.values[3], serde_json::json!(4.5));
@@ -425,6 +425,17 @@ fn insert_row_does_not_guess_without_a_confirmed_pattern() {
     // Clean +1 sequences -> still continued
     assert_eq!(row.values[2], serde_json::json!(18));
     assert_eq!(row.values[3], serde_json::json!("A-18"));
+}
+
+fn write_rich_parquet(path: &std::path::Path) {
+    let conn = duckdb::Connection::open_in_memory().unwrap();
+    let sql = r#"CREATE TABLE t (id INT, blob_col BLOB, list_col INT[], struct_col STRUCT(a INT, b VARCHAR), ts TIMESTAMP);
+         INSERT INTO t VALUES
+           (1, '\xDE\xAD\xBE\xEF'::BLOB, [1, 2, 3], {'a': 7, 'b': 'x'}, TIMESTAMP '2020-01-02 03:04:05.123456'),
+           (2, '\x00\xFF'::BLOB, [4, 5], {'a': 8, 'b': 'y'}, TIMESTAMP '2021-02-03 04:05:06.654321');
+         COPY t TO '__PATH__' (FORMAT PARQUET);"#
+        .replace("__PATH__", &path.display().to_string().replace('\'', "''"));
+    conn.execute_batch(&sql).unwrap();
 }
 
 fn write_keyed_parquet(path: &std::path::Path, id: i64, label: &str) {
@@ -666,4 +677,95 @@ fn editor_can_be_reopened_transactionally() {
         engine.get_all_rows().unwrap()[0].values[0],
         serde_json::json!(0)
     );
+}
+
+#[test]
+fn undo_restores_blob_and_microsecond_timestamps() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("rich.parquet");
+    write_rich_parquet(&path);
+
+    let mut engine = DuckDbEngine::open_parquet(path.to_str().unwrap()).unwrap();
+    let columns = engine.column_info().unwrap();
+    let before = engine.get_all_rows().unwrap();
+    assert!(
+        before[0].values[4].as_str().unwrap().contains("123456"),
+        "microsecond precision missing: {:?}",
+        before[0].values[4]
+    );
+
+    // BLOB assignment casts the new text; undo must restore the original bytes.
+    engine
+        .edit_cell(1, 1, &serde_json::json!("scratch"), &columns)
+        .unwrap();
+    engine
+        .edit_cell(1, 4, &serde_json::json!("2022-05-06 07:08:09.111213"), &columns)
+        .unwrap();
+    engine.undo().unwrap();
+    engine.undo().unwrap();
+
+    let after = engine.get_all_rows().unwrap();
+    assert_eq!(after[0].values[1], before[0].values[1]);
+    assert_eq!(after[0].values[4], before[0].values[4]);
+}
+
+#[test]
+fn undo_restores_deleted_rows_with_nested_types_exactly() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("rich.parquet");
+    write_rich_parquet(&path);
+
+    let mut engine = DuckDbEngine::open_parquet(path.to_str().unwrap()).unwrap();
+    let before = engine.get_all_rows().unwrap();
+
+    engine.delete_rows(&[1]).unwrap();
+    assert_eq!(engine.get_all_rows().unwrap().len(), 1);
+
+    engine.undo().unwrap();
+    let after = engine.get_all_rows().unwrap();
+    assert_eq!(after.len(), 2);
+    assert_eq!(after[0].values, before[0].values);
+}
+
+#[test]
+fn undo_snapshots_are_released() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("rich.parquet");
+    write_rich_parquet(&path);
+
+    let mut engine = DuckDbEngine::open_parquet(path.to_str().unwrap()).unwrap();
+    let columns = engine.column_info().unwrap();
+    assert_eq!(engine.undo_snapshot_count(), 0);
+
+    engine
+        .edit_cell(1, 1, &serde_json::json!("scratch"), &columns)
+        .unwrap();
+    assert_eq!(engine.undo_snapshot_count(), 1);
+
+    // A new mutation after undo discards the redo entry and its snapshot.
+    engine.undo().unwrap();
+    engine
+        .edit_cell(1, 1, &serde_json::json!("again"), &columns)
+        .unwrap();
+    assert_eq!(engine.undo_snapshot_count(), 1);
+
+    engine.close_editor().unwrap();
+    assert_eq!(engine.undo_snapshot_count(), 0);
+}
+
+#[test]
+fn execute_sql_skips_leading_comments_and_rejects_dml() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("sample.parquet");
+    write_sample_parquet(&path);
+
+    let engine = DuckDbEngine::open_parquet(path.to_str().unwrap()).unwrap();
+
+    let res = engine
+        .execute_sql("-- leading comment\n/* block */ SELECT count(*) AS n FROM __pq_working")
+        .unwrap();
+    assert_eq!(res.rows.len(), 1);
+
+    let err = engine.execute_sql("DELETE FROM __pq_working").unwrap_err();
+    assert!(err.contains("Only SELECT"));
 }
