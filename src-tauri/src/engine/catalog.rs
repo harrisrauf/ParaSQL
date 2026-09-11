@@ -174,6 +174,15 @@ pub fn write_workspace(path: &str, ws: &Workspace) -> Result<(), String> {
     doc.relativize_paths();
     let raw = serde_json::to_string_pretty(&doc)
         .map_err(|e| format!("Failed to serialize workspace: {}", e))?;
-    std::fs::write(path, raw).map_err(|e| format!("Failed to write workspace: {}", e))?;
-    Ok(())
+    // Write to a sibling temp file and atomically replace, so an interrupted
+    // save can never leave a truncated .parasql behind.
+    let tmp = format!("{}.tmp-{}", path, std::process::id());
+    if let Err(e) = std::fs::write(&tmp, raw) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("Failed to write workspace: {}", e));
+    }
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("Failed to replace workspace: {}", e)
+    })
 }

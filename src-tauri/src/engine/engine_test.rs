@@ -572,3 +572,98 @@ fn workspace_editor_flow() {
     let err = engine.column_info().unwrap_err();
     assert!(!err.is_empty());
 }
+
+#[test]
+fn engine_tracks_dirty_state_across_mutations() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("sample.parquet");
+    write_sample_parquet(&path);
+
+    let mut engine = DuckDbEngine::open_parquet(path.to_str().unwrap()).unwrap();
+    assert!(!engine.is_dirty());
+
+    engine.insert_row().unwrap();
+    assert!(engine.is_dirty());
+
+    engine.undo().unwrap();
+    assert_eq!(engine.row_count(), 1022);
+
+    engine.mark_clean();
+    assert!(!engine.is_dirty());
+}
+
+#[test]
+fn failed_mutation_does_not_push_undo_entry() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("sample.parquet");
+    write_sample_parquet(&path);
+
+    let mut engine = DuckDbEngine::open_parquet(path.to_str().unwrap()).unwrap();
+    let columns = engine.column_info().unwrap();
+    let before = engine.row_count();
+
+    engine.insert_row().unwrap();
+    assert_eq!(engine.row_count(), before + 1);
+    assert!(engine.can_undo());
+
+    // Invalid column index fails before any SQL executes.
+    let bad = engine.edit_cell(1, 9999, &serde_json::json!(1), &columns);
+    assert!(bad.is_err());
+
+    engine.undo().unwrap();
+    // Undo must reverse the insert exactly once (no duplicate rows).
+    assert_eq!(engine.row_count(), before);
+}
+
+#[test]
+fn reserved_workspace_table_names_rejected() {
+    use super::catalog;
+
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("sample.parquet");
+    write_sample_parquet(&src);
+
+    let mut ws = catalog::Workspace::new("t");
+    ws.add_table("t", src.to_str().unwrap(), "file", "query");
+    ws.resolve_paths();
+
+    let mut engine = DuckDbEngine::open_workspace(&ws).unwrap();
+
+    ws.add_table("__pq_working", src.to_str().unwrap(), "file", "query");
+    ws.resolve_paths();
+    let err = engine.sync_workspace_tables(&ws).unwrap_err();
+    assert!(err.contains("reserved"), "unexpected error: {}", err);
+
+    // The engine remains usable after a rejected sync.
+    assert!(engine.execute_sql("SELECT * FROM t LIMIT 1").is_ok());
+}
+
+#[test]
+fn editor_can_be_reopened_transactionally() {
+    use super::catalog;
+
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("sample.parquet");
+    write_sample_parquet(&src);
+
+    let mut ws = catalog::Workspace::new("t");
+    ws.add_table("t", src.to_str().unwrap(), "file", "editable");
+    ws.resolve_paths();
+    let mut engine = DuckDbEngine::open_workspace(&ws).unwrap();
+
+    engine.open_editor_table("t", src.to_str().unwrap()).unwrap();
+    let columns = engine.column_info().unwrap();
+    engine
+        .edit_cell(1, 0, &serde_json::json!(111), &columns)
+        .unwrap();
+    assert!(engine.is_dirty());
+
+    // Re-opening the same table must succeed and reset the working state.
+    engine.open_editor_table("t", src.to_str().unwrap()).unwrap();
+    assert!(engine.has_editor());
+    assert!(!engine.is_dirty());
+    assert_eq!(
+        engine.get_all_rows().unwrap()[0].values[0],
+        serde_json::json!(0)
+    );
+}

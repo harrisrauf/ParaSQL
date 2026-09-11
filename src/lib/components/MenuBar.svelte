@@ -132,8 +132,8 @@
       id: 'edit',
       label: 'Edit',
       items: [
-        { label: 'Undo', action: () => undoFlow(), disabled: !undoAvail },
-        { label: 'Redo', action: () => redoFlow(), disabled: !redoAvail },
+        { label: 'Undo', action: () => undoFlow(), disabled: !undoAvail || !editable },
+        { label: 'Redo', action: () => redoFlow(), disabled: !redoAvail || !editable },
         { separator: true },
         { label: 'Copy', action: () => copySelectionToClipboard(), disabled: selectedCount === 0 },
         { label: 'Select All', action: selectAll, disabled: !hasData },
@@ -170,7 +170,7 @@
       id: 'data',
       label: 'Data',
       items: [
-        { label: 'Insert Row', action: () => insertRowFlow(), disabled: !hasData },
+        { label: 'Insert Row', action: () => insertRowFlow(), disabled: !hasData || !editable },
         { separator: true },
         {
           label: 'Sort',

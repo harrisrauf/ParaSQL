@@ -26,6 +26,7 @@
     copyRowAsJson,
     newWorkspaceFlow,
     openWorkspaceFlow,
+    saveWorkspaceFlow,
   } from './lib/actions';
   import type { RowData } from './lib/types';
 
@@ -55,19 +56,20 @@
     // Undo: Ctrl+Z
     if (mod && e.key === 'z' && !e.shiftKey) {
       e.preventDefault();
-      undoFlow();
+      if (editable) undoFlow();
       return;
     }
     // Redo: Ctrl+Y or Ctrl+Shift+Z
     if (mod && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
       e.preventDefault();
-      redoFlow();
+      if (editable) redoFlow();
       return;
     }
-    // Save: Ctrl+S
+    // Save: Ctrl+S (a workspace document takes precedence when one is open)
     if (mod && e.key === 's') {
       e.preventDefault();
-      saveFlow();
+      if ($workspaceStore.doc) saveWorkspaceFlow();
+      else saveFlow();
       return;
     }
     // Copy: Ctrl+C (with grid focus)
@@ -86,7 +88,7 @@
       return;
     }
     // Delete selected rows (grid focus only — not while a button is focused)
-    if (e.key === 'Delete' && tag !== 'button' && selectedIds.size > 0) {
+    if (e.key === 'Delete' && tag !== 'button' && selectedIds.size > 0 && editable) {
       deleteSelectedFlow();
     }
   }

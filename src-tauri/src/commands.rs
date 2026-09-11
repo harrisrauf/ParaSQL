@@ -127,7 +127,9 @@ pub async fn save_file(state: State<'_, AppState>) -> Result<(), String> {
             .ok_or_else(|| "No file path set".to_string())?
             .to_string_lossy()
             .to_string();
-        engine.export_parquet(&path)
+        engine.export_parquet(&path)?;
+        engine.mark_clean();
+        Ok(())
     })
     .await
 }
@@ -137,6 +139,7 @@ pub async fn save_file_as(path: String, state: State<'_, AppState>) -> Result<()
     with_editor_mut(state, move |engine| {
         engine.export_parquet(&path)?;
         engine.set_file_path(&path);
+        engine.mark_clean();
         Ok(())
     })
     .await
@@ -149,7 +152,7 @@ pub async fn get_file_info(state: State<'_, AppState>) -> Result<serde_json::Val
         Ok(serde_json::json!({
             "rows": engine.row_count(),
             "cols": columns.len(),
-            "modified": false,
+            "modified": engine.is_dirty(),
             "path": engine.file_path().map(|p| p.to_string_lossy().to_string()),
             "columns": columns,
             "can_undo": engine.can_undo(),
