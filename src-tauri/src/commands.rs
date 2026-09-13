@@ -48,7 +48,7 @@ async fn with_engine<T: Send + 'static>(
 ) -> Result<T, String> {
     let engine = state.engine.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let eng = engine.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let eng = engine.lock().unwrap_or_else(|e| e.into_inner());
         let inner = eng.as_ref().ok_or_else(|| "No file open".to_string())?;
         f(inner)
     })
@@ -63,7 +63,7 @@ async fn with_engine_mut<T: Send + 'static>(
 ) -> Result<T, String> {
     let engine = state.engine.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let mut eng = engine.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
         let inner = eng.as_mut().ok_or_else(|| "No file open".to_string())?;
         f(inner)
     })
@@ -82,7 +82,7 @@ pub async fn open_file(path: String, state: State<'_, AppState>) -> Result<Metad
             .file_path()
             .map(|p| p.to_string_lossy().to_string());
 
-        let mut eng = engine.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
         *eng = Some(new_engine);
 
         Ok(MetadataJson {
@@ -106,7 +106,7 @@ pub async fn open_folder(path: String, state: State<'_, AppState>) -> Result<Met
             .file_path()
             .map(|p| p.to_string_lossy().to_string());
 
-        let mut eng = engine.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
         *eng = Some(new_engine);
 
         Ok(MetadataJson {
@@ -272,7 +272,7 @@ pub async fn redo(state: State<'_, AppState>) -> Result<(), String> {
 pub async fn can_undo(state: State<'_, AppState>) -> Result<bool, String> {
     let engine = state.engine.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let eng = engine.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let eng = engine.lock().unwrap_or_else(|e| e.into_inner());
         Ok(eng.as_ref().is_some_and(|e| e.has_editor() && e.can_undo()))
     })
     .await
@@ -283,7 +283,7 @@ pub async fn can_undo(state: State<'_, AppState>) -> Result<bool, String> {
 pub async fn can_redo(state: State<'_, AppState>) -> Result<bool, String> {
     let engine = state.engine.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let eng = engine.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let eng = engine.lock().unwrap_or_else(|e| e.into_inner());
         Ok(eng.as_ref().is_some_and(|e| e.has_editor() && e.can_redo()))
     })
     .await
@@ -305,6 +305,21 @@ pub async fn export_excel(path: String, state: State<'_, AppState>) -> Result<()
     with_editor_mut(state, move |engine| engine.export_excel(&path)).await
 }
 
+/// Export the result of an ad-hoc SELECT query (works in Lite and workspace mode).
+#[tauri::command]
+pub async fn export_query(
+    sql: String,
+    out_path: String,
+    format: String,
+    compression: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    with_engine(state, move |engine| {
+        engine.export_query(&sql, &out_path, &format, compression.as_deref())
+    })
+    .await
+}
+
 // --- Workspace (multi-file "database") commands ---
 
 fn workspace_dir(path: &str) -> String {
@@ -320,7 +335,7 @@ pub async fn open_workspace(path: String, state: State<'_, AppState>) -> Result<
     tauri::async_runtime::spawn_blocking(move || {
         let ws = catalog::load_workspace(&path)?;
         let new_engine = DuckDbEngine::open_workspace(&ws)?;
-        let mut eng = engine.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
         *eng = Some(new_engine);
         serde_json::to_value(&ws).map_err(|e| e.to_string())
     })
@@ -351,7 +366,7 @@ pub async fn sync_workspace_tables(
         let mut doc = ws;
         doc.dir = Some(workspace_dir(&path));
         doc.resolve_paths();
-        let mut eng = engine.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
         let inner = eng.as_mut().ok_or_else(|| "No workspace open".to_string())?;
         inner.sync_workspace_tables(&doc)?;
         serde_json::to_value(&doc).map_err(|e| e.to_string())
@@ -371,7 +386,29 @@ pub async fn open_table_for_edit(
     let engine = state.engine.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let doc = ws;
-        let size_mb = std::fs::metadata(&path)
+        // Resolve the file from the workspace document rather than trusting the
+        // caller-supplied path, so a stale or renamed table cannot open the wrong file.
+        let table = doc
+            .tables
+            .iter()
+            .find(|t| t.name == name)
+            .ok_or_else(|| format!("Table '{}' is not in this workspace", name))?;
+        let abs = match table.abs_path.clone() {
+            Some(p) => std::path::PathBuf::from(p),
+            None => {
+                let p = std::path::PathBuf::from(&table.path);
+                if p.is_absolute() {
+                    p
+                } else if let Some(dir) = doc.dir.clone() {
+                    std::path::PathBuf::from(dir).join(p)
+                } else {
+                    p
+                }
+            }
+        };
+        let _ = path;
+        let abs = abs.to_string_lossy().to_string();
+        let size_mb = std::fs::metadata(&abs)
             .map(|m| m.len() as f64 / (1024.0 * 1024.0))
             .unwrap_or(0.0);
         let limit = doc.edit_size_limit_mb.unwrap_or(u64::MAX) as f64;
@@ -382,9 +419,9 @@ pub async fn open_table_for_edit(
                 "size_mb": size_mb.round(),
             }));
         }
-        let mut eng = engine.lock().map_err(|e| format!("Lock error: {}", e))?;
+        let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
         let inner = eng.as_mut().ok_or_else(|| "No workspace open".to_string())?;
-        inner.open_editor_table(&name, &path)?;
+        inner.open_editor_table(&name, &abs)?;
         Ok(serde_json::json!({
             "opened": true,
             "size_mb": size_mb.round(),

@@ -5,7 +5,7 @@ import { workspaceStore } from '../stores/workspace';
 import { tableStore } from '../stores/table';
 import * as a from '../actions';
 import type { WorkspaceTable, TableSummary } from '../types';
-import { confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
+import { confirmDialog } from '../dialogs';
 
 let search = $state('');
 let selectedTable = $state<string | null>(null);

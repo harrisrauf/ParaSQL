@@ -10,7 +10,6 @@
       "compression": null,
       "size": 23162,
       "mtime": null,
-      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\bank_failures.parquet",
       "missing": false
     },
     {
@@ -21,7 +20,6 @@
       "compression": null,
       "size": 2448,
       "mtime": null,
-      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\iris.parquet",
       "missing": false
     },
     {
@@ -32,7 +30,6 @@
       "compression": null,
       "size": 621,
       "mtime": null,
-      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\sample-empty.parquet",
       "missing": false
     },
     {
@@ -43,7 +40,6 @@
       "compression": null,
       "size": 315900,
       "mtime": null,
-      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\sample-gzip.parquet",
       "missing": false
     },
     {
@@ -54,7 +50,6 @@
       "compression": null,
       "size": 5163357,
       "mtime": null,
-      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\sample-large.parquet",
       "missing": false
     },
     {
@@ -65,7 +60,6 @@
       "compression": null,
       "size": 2532,
       "mtime": null,
-      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\sample-nested.parquet",
       "missing": false
     },
     {
@@ -76,7 +70,6 @@
       "compression": null,
       "size": 4344,
       "mtime": null,
-      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\sample-types.parquet",
       "missing": false
     },
     {
@@ -87,7 +80,6 @@
       "compression": null,
       "size": 1441167,
       "mtime": null,
-      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\sample-uncompressed.parquet",
       "missing": false
     },
     {
@@ -96,9 +88,8 @@
       "source": "file",
       "mode": "query",
       "compression": null,
-      "size": 29812,
+      "size": 29811,
       "mtime": null,
-      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\sample-users.parquet",
       "missing": false
     },
     {
@@ -109,7 +100,6 @@
       "compression": null,
       "size": 5083,
       "mtime": null,
-      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\search_trends.parquet",
       "missing": false
     },
     {
@@ -120,7 +110,6 @@
       "compression": null,
       "size": 40013,
       "mtime": null,
-      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\titanic.parquet",
       "missing": false
     },
     {
@@ -131,7 +120,6 @@
       "compression": null,
       "size": null,
       "mtime": null,
-      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\sales\\products.parquet",
       "missing": false
     },
     {
@@ -142,7 +130,6 @@
       "compression": null,
       "size": null,
       "mtime": null,
-      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\sales\\customers.parquet",
       "missing": false
     },
     {
@@ -153,7 +140,6 @@
       "compression": null,
       "size": null,
       "mtime": null,
-      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\sales\\orders.parquet",
       "missing": false
     },
     {
@@ -164,7 +150,6 @@
       "compression": null,
       "size": null,
       "mtime": null,
-      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\sales\\order_items.parquet",
       "missing": false
     }
   ],
@@ -185,6 +170,5 @@
   "charts": [],
   "dashboards": [],
   "notebooks": [],
-  "edit_size_limit_mb": 2048,
-  "dir": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data"
+  "edit_size_limit_mb": 2048
 }

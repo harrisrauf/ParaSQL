@@ -42,9 +42,12 @@
   });
 
   // Keep undo/redo availability in sync with engine-side state changes.
+  // Guard against repeated IPC chatter: only refresh when the state key moves.
+  let lastUndoKey: string | null = null;
   $effect(() => {
-    void $tableStore.rows;
-    void $tableStore.editable;
+    const key = `${$tableStore.rows.length}:${$tableStore.totalRows}:${$tableStore.modified}:${$tableStore.editable}`;
+    if (key === lastUndoKey) return;
+    lastUndoKey = key;
     refreshUndoRedo();
   });
 

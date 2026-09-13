@@ -17,7 +17,7 @@ export interface WorkspaceState {
 const initialState = (): WorkspaceState => ({
   path: null,
   doc: null,
-  activeView: 'query',
+  activeView: 'data',
   editorOpen: false,
   metas: {},
   loading: false,

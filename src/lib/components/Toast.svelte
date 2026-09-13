@@ -2,15 +2,15 @@
   import { toastStore } from '../stores/ui';
 </script>
 
-{#if $toastStore.length > 0}
-  <div class="toast-stack" role="status" aria-live="polite">
+<div class="toast-stack" role="status" aria-live="polite" aria-label="Notifications">
+  {#if $toastStore.length > 0}
     {#each $toastStore as t (t.id)}
       <button class="toast toast-{t.kind}" onclick={() => toastStore.dismiss(t.id)}>
         {t.message}
       </button>
     {/each}
-  </div>
-{/if}
+  {/if}
+</div>
 
 <style>
   .toast-stack {

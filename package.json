@@ -8,7 +8,10 @@
     "build": "vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "check": "svelte-check --tsconfig ./tsconfig.json"
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "dev:e2e": "tauri dev -- --config src-tauri/tauri.e2e.conf.json",
+    "e2e:smoke": "node e2e/playwright-check.mjs",
+    "e2e:deep": "node e2e/deep-tests.mjs"
   },
   "dependencies": {
     "@tanstack/svelte-virtual": "^3.13.0",

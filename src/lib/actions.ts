@@ -1,5 +1,5 @@
 import { get } from 'svelte/store';
-import { open, save, confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
+import { pickOpen, pickSave, confirmDialog } from './dialogs';
 import * as cmds from './commands';
 import { tableStore, displayedRows, selectedRowIds, initialLoadThreshold } from './stores/table';
 import { settings } from './stores/settings';
@@ -60,39 +60,65 @@ export async function openFileFlow(path?: string): Promise<boolean> {
   if (!(await confirmDiscardChanges())) return false;
   let selected = path;
   if (!selected) {
-    const res = await open({
+    const res = await pickOpen({
       multiple: false,
       filters: [{ name: 'Parquet', extensions: ['parquet'] }],
     });
     if (!res) return false;
     selected = res;
   }
-  const meta = await cmds.openFile(selected);
-  let rows: RowData[];
-  if (meta.total_rows > initialLoadThreshold) {
-    rows = await cmds.getPage(null, 10_000);
-  } else {
-    rows = await cmds.getAllRows();
+  // Opening a Lite file replaces the engine; workspace views would silently
+  // break, so leave workspace mode explicitly (unsaved edits were confirmed above).
+  if (get(workspaceStore).doc) {
+    if (!(await confirmDialog('Opening a file closes the current workspace. Continue?'))) return false;
+    await cmds.closeEditor().catch(() => {});
+    workspaceStore.reset();
   }
-  tableStore.open(meta.columns, rows, meta.total_rows, meta.file_path ?? selected);
-  pushRecent(meta.file_path ?? selected);
-  return true;
+  try {
+    const meta = await cmds.openFile(selected);
+    let rows: RowData[];
+    if (meta.total_rows > initialLoadThreshold) {
+      rows = await cmds.getPage(null, 10_000);
+    } else {
+      rows = await cmds.getAllRows();
+    }
+    tableStore.open(meta.columns, rows, meta.total_rows, meta.file_path ?? selected);
+    pushRecent(meta.file_path ?? selected);
+    // If a workspace shell is visible, show the freshly opened data there.
+    workspaceStore.update(v => ({ ...v, activeView: 'data' }));
+    return true;
+  } catch (e) {
+    notify(`Could not open file: ${errorMessage(e)}`, 'error');
+    return false;
+  }
 }
 
 export async function openFolderFlow(): Promise<boolean> {
   if (!(await confirmDiscardChanges())) return false;
-  const selected = await open({ directory: true, multiple: false });
+  const selected = await pickOpen({ directory: true, multiple: false });
   if (!selected) return false;
-  const meta = await cmds.openFolder(selected);
-  let rows: RowData[];
-  if (meta.total_rows > initialLoadThreshold) {
-    rows = await cmds.getPage(null, 10_000);
-  } else {
-    rows = await cmds.getAllRows();
+  // Opening a Lite folder replaces the engine; leave workspace mode explicitly.
+  if (get(workspaceStore).doc) {
+    if (!(await confirmDialog('Opening a folder closes the current workspace. Continue?'))) return false;
+    await cmds.closeEditor().catch(() => {});
+    workspaceStore.reset();
   }
-  tableStore.open(meta.columns, rows, meta.total_rows, meta.file_path ?? selected);
-  pushRecent(meta.file_path ?? selected);
-  return true;
+  try {
+    const meta = await cmds.openFolder(selected);
+    let rows: RowData[];
+    if (meta.total_rows > initialLoadThreshold) {
+      rows = await cmds.getPage(null, 10_000);
+    } else {
+      rows = await cmds.getAllRows();
+    }
+    tableStore.open(meta.columns, rows, meta.total_rows, meta.file_path ?? selected);
+    pushRecent(meta.file_path ?? selected);
+    workspaceStore.update(v => ({ ...v, activeView: 'data' }));
+    return true;
+  } catch (e) {
+    notify(`Could not open folder: ${errorMessage(e)}`, 'error');
+    return false;
+  }
 }
 
 export async function saveFlow(): Promise<boolean> {
@@ -114,7 +140,7 @@ export async function saveFlow(): Promise<boolean> {
 }
 
 export async function saveAsFlow(): Promise<boolean> {
-  const selected = await save({
+  const selected = await pickSave({
     filters: [{ name: 'Parquet', extensions: ['parquet'] }],
   });
   if (!selected) return false;
@@ -132,7 +158,7 @@ export async function saveAsFlow(): Promise<boolean> {
 
 export async function exportFlow(format: 'json' | 'csv' | 'excel'): Promise<boolean> {
   const ext = format === 'excel' ? 'xlsx' : format;
-  const selected = await save({
+  const selected = await pickSave({
     filters: [{ name: ext.toUpperCase(), extensions: [ext] }],
   });
   if (!selected) return false;
@@ -156,7 +182,7 @@ export async function undoFlow(): Promise<void> {
   try {
     await cmds.undo();
     const [rows, columns, info] = await Promise.all([
-      cmds.getAllRows(),
+      cmds.getPage(null, 10_000),
       cmds.getColumns(),
       cmds.getFileInfo(),
     ]);
@@ -164,7 +190,7 @@ export async function undoFlow(): Promise<void> {
       ...s,
       rows,
       columns,
-      totalRows: rows.length,
+      totalRows: info.rows ?? rows.length,
       sqlResult: null,
       savedTable: null,
       selection: { anchor: null, cells: new Set(), allRows: false },
@@ -186,7 +212,7 @@ export async function redoFlow(): Promise<void> {
   try {
     await cmds.redo();
     const [rows, columns, info] = await Promise.all([
-      cmds.getAllRows(),
+      cmds.getPage(null, 10_000),
       cmds.getColumns(),
       cmds.getFileInfo(),
     ]);
@@ -194,7 +220,7 @@ export async function redoFlow(): Promise<void> {
       ...s,
       rows,
       columns,
-      totalRows: rows.length,
+      totalRows: info.rows ?? rows.length,
       sqlResult: null,
       savedTable: null,
       selection: { anchor: null, cells: new Set(), allRows: false },
@@ -294,6 +320,12 @@ export async function copySelectionToClipboard(): Promise<void> {
     const rows = get(displayedRows);
     const lines = rows.map(r => cols.map((_, i) => tsvQuote(cellText(r.values[i]))).join('\t'));
     await writeClipboard(lines.join('\n'));
+    if (rows.length < state.totalRows) {
+      notify(
+        `Copied ${rows.length.toLocaleString()} selected rows (of ${state.totalRows.toLocaleString()} total).`,
+        'info'
+      );
+    }
     return;
   }
 
@@ -425,7 +457,7 @@ async function persist(doc: Workspace, path: string): Promise<Workspace> {
 
 export async function newWorkspaceFlow(): Promise<boolean> {
   if (!(await confirmDiscardChanges())) return false;
-  const selected = await save({ filters: PARASQL_FILTER });
+  const selected = await pickSave({ filters: PARASQL_FILTER });
   if (!selected) return false;
   try {
     await cmds.closeEditor().catch(() => {});
@@ -434,7 +466,7 @@ export async function newWorkspaceFlow(): Promise<boolean> {
     const loaded = await cmds.openWorkspace(selected);
     tableStore.open([], [], 0, null);
     workspaceStore.set({
-      path: selected, doc: loaded, activeView: 'query', editorOpen: false,
+      path: selected, doc: loaded, activeView: 'data', editorOpen: false,
       metas: {}, loading: false, error: null,
     });
     return true;
@@ -448,7 +480,7 @@ export async function openWorkspaceFlow(path?: string): Promise<boolean> {
   if (!(await confirmDiscardChanges())) return false;
   let selected = path;
   if (!selected) {
-    const res = await open({ multiple: false, filters: PARASQL_FILTER });
+    const res = await pickOpen({ multiple: false, filters: PARASQL_FILTER });
     if (!res) return false;
     selected = res;
   }
@@ -457,7 +489,7 @@ export async function openWorkspaceFlow(path?: string): Promise<boolean> {
     const doc = await cmds.openWorkspace(selected);
     tableStore.open([], [], 0, null);
     workspaceStore.set({
-      path: selected, doc, activeView: 'query', editorOpen: false,
+      path: selected, doc, activeView: 'data', editorOpen: false,
       metas: {}, loading: false, error: null,
     });
     return true;
@@ -483,7 +515,7 @@ export async function saveWorkspaceFlow(): Promise<boolean> {
 export async function saveWorkspaceAsFlow(): Promise<boolean> {
   const s = get(workspaceStore);
   if (!s.doc) return false;
-  const selected = await save({ defaultPath: `${s.doc.name}.parasql`, filters: PARASQL_FILTER });
+  const selected = await pickSave({ defaultPath: `${s.doc.name}.parasql`, filters: PARASQL_FILTER });
   if (!selected) return false;
   try {
     await cmds.saveWorkspace(selected, s.doc);
@@ -498,7 +530,7 @@ export async function saveWorkspaceAsFlow(): Promise<boolean> {
 export async function addTableFlow(): Promise<boolean> {
   const s = get(workspaceStore);
   if (!s.doc || !s.path) return false;
-  const selected = await open({
+  const selected = await pickOpen({
     multiple: false,
     filters: [{ name: 'Parquet', extensions: ['parquet'] }],
   });
@@ -531,7 +563,7 @@ export async function addTableFlow(): Promise<boolean> {
 export async function addFolderFlow(): Promise<boolean> {
   const s = get(workspaceStore);
   if (!s.doc || !s.path) return false;
-  const dir = await open({ directory: true, multiple: false });
+  const dir = await pickOpen({ directory: true, multiple: false });
   if (!dir) return false;
   try {
     const files = await cmds.listParquetFiles(dir);
@@ -577,12 +609,18 @@ export async function addFolderFlow(): Promise<boolean> {
 
 export async function runTableQueryFlow(name: string): Promise<void> {
   const escaped = name.replace(/"/g, '""');
-  const result = await cmds.executeSql(`SELECT * FROM "${escaped}" LIMIT 500`);
-  tableStore.applyQueryResult(result);
-  workspaceStore.update(v => ({ ...v, activeView: 'query' }));
+  const sql = `SELECT * FROM "${escaped}" LIMIT 500`;
+  try {
+    const result = await cmds.executeSql(sql);
+    tableStore.applyQueryResult(result, sql);
+    workspaceStore.update(v => ({ ...v, activeView: 'data' }));
+  } catch (e) {
+    notify(`Could not preview "${name}": ${errorMessage(e)}`, 'error');
+  }
 }
 
-export async function removeTableFlow(name: string): Promise<boolean> {  const s = get(workspaceStore);
+export async function removeTableFlow(name: string): Promise<boolean> {
+  const s = get(workspaceStore);
   if (!s.doc || !s.path) return false;
   const doc = { ...s.doc, tables: s.doc.tables.filter(t => t.name !== name) };
   try {
@@ -590,7 +628,7 @@ export async function removeTableFlow(name: string): Promise<boolean> {  const s
     workspaceStore.update(v => ({ ...v, doc: synced }));
     return true;
   } catch (e) {
-    console.error('Failed to remove table:', e);
+    notify(`Failed to remove table: ${errorMessage(e)}`, 'error');
     return false;
   }
 }
@@ -610,7 +648,7 @@ export async function renameTableFlow(oldName: string, newName: string): Promise
     workspaceStore.update(v => ({ ...v, doc: synced }));
     return true;
   } catch (e) {
-    console.error('Failed to rename table:', e);
+    notify(`Failed to rename table: ${errorMessage(e)}`, 'error');
     return false;
   }
 }
@@ -627,7 +665,7 @@ export async function setTableModeFlow(name: string, mode: 'query' | 'editable')
     workspaceStore.update(v => ({ ...v, doc: synced }));
     return true;
   } catch (e) {
-    console.error('Failed to set table mode:', e);
+    notify(`Failed to update table mode: ${errorMessage(e)}`, 'error');
     return false;
   }
 }
@@ -636,7 +674,7 @@ export async function exportTableFlow(name: string, compression = 'zstd'): Promi
   const s = get(workspaceStore);
   const table = s.doc?.tables.find(t => t.name === name);
   if (!table) return false;
-  const selected = await save({
+  const selected = await pickSave({
     defaultPath: `${name}.parquet`,
     filters: [{ name: 'Parquet', extensions: ['parquet'] }],
   });
@@ -645,7 +683,7 @@ export async function exportTableFlow(name: string, compression = 'zstd'): Promi
     await cmds.exportTable(name, selected, compression);
     return true;
   } catch (e) {
-    console.error('Failed to export table:', e);
+    notify(`Export failed: ${errorMessage(e)}`, 'error');
     return false;
   }
 }
@@ -676,7 +714,7 @@ export async function openEditorFlow(name: string): Promise<boolean> {
     }
     const [columns, rows, fileInfo] = await Promise.all([
       cmds.getColumns(),
-      cmds.getAllRows(),
+      cmds.getPage(null, 10_000),
       cmds.getFileInfo(),
     ]);
     tableStore.open(columns, rows, fileInfo.rows ?? rows.length, path);
@@ -689,13 +727,20 @@ export async function openEditorFlow(name: string): Promise<boolean> {
 }
 
 export async function closeEditorFlow(): Promise<void> {
+  const s = get(workspaceStore);
+  // Closing the editor discards any unsaved edits — never do that silently.
+  if (s.editorOpen && get(tableStore).modified) {
+    if (!(await confirmDialog('The open editor has unsaved changes. Discard them?'))) return;
+  }
   try {
     await cmds.closeEditor();
-  } catch {
-    // no editor open is fine
+  } catch (e) {
+    // A backend close failure must not pretend the editor is gone.
+    notify(`Failed to close editor: ${errorMessage(e)}`, 'error');
+    return;
   }
   tableStore.open([], [], 0, null);
-  workspaceStore.update(v => ({ ...v, editorOpen: false, activeView: 'query' }));
+  workspaceStore.update(v => ({ ...v, editorOpen: false, activeView: 'data' }));
 }
 
 export async function showEditorDataFlow(): Promise<void> {
@@ -706,7 +751,7 @@ export async function showEditorDataFlow(): Promise<void> {
   // dirty/saved state intact.
   const [columns, rows, info] = await Promise.all([
     cmds.getColumns(),
-    cmds.getAllRows(),
+    cmds.getPage(null, 10_000),
     cmds.getFileInfo(),
   ]);
   tableStore.update(t => ({
@@ -727,7 +772,45 @@ export async function summarizeTableFlow(name: string): Promise<TableSummary | n
   try {
     return await cmds.summarizeTable(name);
   } catch (e) {
-    console.error('Failed to summarize table:', e);
+    notify(`Could not summarize "${name}": ${errorMessage(e)}`, 'error');
     return null;
+  }
+}
+
+/** Copy the full last SQL result (all rows) as TSV. */
+export async function copyAllResultToClipboard(): Promise<void> {
+  const result = get(tableStore).sqlResult;
+  if (!result) return;
+  const header = result.columns.map(c => tsvQuote(c.name)).join('\t');
+  const lines = result.rows.map(row =>
+    row.values.map(v => tsvQuote(cellText(v as string | number | boolean | null))).join('\t')
+  );
+  await writeClipboard([header, ...lines].join('\n'));
+}
+
+/** Export the last SQL result to CSV / Excel / Parquet via the backend. */
+export async function exportResultFlow(format: 'csv' | 'excel' | 'parquet'): Promise<boolean> {
+  const sql = get(tableStore).lastSql;
+  if (!sql) {
+    notify('Run a query first — nothing to export.', 'info');
+    return false;
+  }
+  const extension = format === 'excel' ? 'xlsx' : format;
+  const filters =
+    format === 'csv'
+      ? [{ name: 'CSV', extensions: ['csv'] }]
+      : format === 'excel'
+        ? [{ name: 'Excel', extensions: ['xlsx'] }]
+        : [{ name: 'Parquet', extensions: ['parquet'] }];
+  const selected = await pickSave({ defaultPath: `query-result.${extension}`, filters });
+  if (!selected) return false;
+  try {
+    await cmds.exportQuery(sql, selected, format);
+    const name = selected.split(/[\\/]/).pop() ?? selected;
+    notify(`Exported ${name}`, 'success');
+    return true;
+  } catch (e) {
+    notify(`Export failed: ${errorMessage(e)}`, 'error');
+    return false;
   }
 }

@@ -4,7 +4,7 @@
   let { value, dtype, onSave, onCancel }: {
     value: string | number | boolean | null;
     dtype: string;
-    onSave: (val: string | number | boolean | null) => void;
+    onSave: (val: string | number | boolean | null) => Promise<boolean> | boolean | void;
     onCancel: () => void;
   } = $props();
 
@@ -20,17 +20,20 @@
     }
   }
 
-  function save() {
+  async function save() {
     if (committed) return;
     committed = true;
+    let result: boolean | void;
     if (dtype.toLowerCase().includes('int') || dtype.toLowerCase().includes('float')) {
       const num = inputValue === '' ? null : Number(inputValue);
-      onSave(isNaN(num as number) ? null : num);
+      result = await onSave(isNaN(num as number) ? null : num);
     } else if (dtype.toLowerCase() === 'boolean') {
-      onSave(inputValue === 'true');
+      result = await onSave(inputValue === 'true');
     } else {
-      onSave(inputValue === '' ? null : inputValue);
+      result = await onSave(inputValue === '' ? null : inputValue);
     }
+    // A failed save keeps the editor open for correction — allow retrying.
+    if (result === false) committed = false;
   }
 
   function formatValue(v: string | number | boolean | null): string {

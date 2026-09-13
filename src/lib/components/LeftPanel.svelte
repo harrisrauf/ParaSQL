@@ -2,8 +2,9 @@
   import SqlEditor from './SqlEditor.svelte';
   import { tableStore } from '../stores/table';
   import { settings, type SchemaDialect } from '../stores/settings';
-  import { generateSchema, getColumns, getAllRows, dropColumn, renameColumn, addColumn } from '../commands';
-  import { confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
+  import { generateSchema, getColumns, getPage, dropColumn, renameColumn, addColumn } from '../commands';
+  import { confirmDialog } from '../dialogs';
+  import { notify } from '../stores/ui';
 
   let columns = $derived($tableStore.columns);
   let activeTab = $derived($tableStore.activeTab);
@@ -42,12 +43,12 @@
     if (renamingCol && renameValue && renameValue !== renamingCol) {
       try {
         await renameColumn(renamingCol, renameValue);
-        const [rows, cols] = await Promise.all([getAllRows(), getColumns()]);
+        const [rows, cols] = await Promise.all([getPage(null, 10_000), getColumns()]);
         tableStore.update(s => ({ ...s, rows, columns: cols, modified: true }));
         tableStore.clearFilters();
         tableStore.clearSelection();
       } catch (err) {
-        console.error('Failed to rename column:', err);
+        notify(`Failed to rename column: ${err instanceof Error ? err.message : String(err)}`, 'error');
       }
     }
     renamingCol = null;
@@ -58,12 +59,12 @@
     if (!(await confirmDialog(`Delete column "${name}"? This can be undone.`))) return;
     try {
       await dropColumn(name);
-      const [rows, cols] = await Promise.all([getAllRows(), getColumns()]);
+      const [rows, cols] = await Promise.all([getPage(null, 10_000), getColumns()]);
       tableStore.update(s => ({ ...s, rows, columns: cols, modified: true }));
         tableStore.clearFilters();
         tableStore.clearSelection();
     } catch (err) {
-      console.error('Failed to drop column:', err);
+      notify(`Failed to drop column: ${err instanceof Error ? err.message : String(err)}`, 'error');
     }
   }
 
@@ -71,14 +72,14 @@
     if (!editable || !newColName) return;
     try {
       await addColumn(newColName, newColType);
-      const [rows, cols] = await Promise.all([getAllRows(), getColumns()]);
+      const [rows, cols] = await Promise.all([getPage(null, 10_000), getColumns()]);
       tableStore.update(s => ({ ...s, rows, columns: cols, modified: true }));
         tableStore.clearFilters();
         tableStore.clearSelection();
       newColName = '';
       addingColumn = false;
     } catch (err) {
-      console.error('Failed to add column:', err);
+      notify(`Failed to add column: ${err instanceof Error ? err.message : String(err)}`, 'error');
     }
   }
 

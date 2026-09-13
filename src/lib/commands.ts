@@ -112,6 +112,15 @@ export async function exportExcel(path: string): Promise<void> {
   return invoke('export_excel', { path });
 }
 
+export async function exportQuery(
+  sql: string,
+  outPath: string,
+  format: 'csv' | 'excel' | 'parquet',
+  compression = 'snappy'
+): Promise<void> {
+  return invoke('export_query', { sql, outPath, format, compression });
+}
+
 // --- Workspace commands ---
 
 export function openWorkspace(path: string): Promise<Workspace> {
