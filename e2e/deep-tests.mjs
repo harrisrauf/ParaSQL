@@ -53,6 +53,7 @@ import {
   assertNoConsoleErrors,
   screenshot,
   escapeNativeDialogs,
+  dialogQueueState,
   openMenu,
   menuClick,
   check,
@@ -77,6 +78,8 @@ const SAVED_USERS = path.join(OUT, 'users-saved.parquet');
 const SAVED_TITANIC = path.join(OUT, 'titanic-copy.parquet');
 const EXPORT_JSON = path.join(OUT, 'titanic-export.json');
 const EXPORT_CSV = path.join(OUT, 'titanic-export.csv');
+const EXPORT_Q_CSV = path.join(OUT, 'query-export.csv');
+const EXPORT_Q_PQ = path.join(OUT, 'query-export.parquet');
 
 const Q_TITANIC =
   'SELECT Pclass, COUNT(*) AS n, SUM(CASE WHEN Survived = 1 THEN 1 ELSE 0 END) AS survived FROM titanic GROUP BY Pclass ORDER BY Pclass';
@@ -214,6 +217,7 @@ try {
   });
 
   await step('editor: default SQL references a real workspace table and runs', async () => {
+    await page().locator('[role=tab]', { hasText: 'Query' }).click();
     const text = await editorText();
     const m = text.match(/^SELECT \* FROM "([^"]+)" LIMIT 100;$/);
     assert(m, `unexpected default query: "${text}"`);
@@ -238,6 +242,23 @@ try {
     for (const v of ['216', '136', '184', '87', '491', '119']) {
       assert(cells.includes(v), `missing value ${v} in ${JSON.stringify(cells.slice(0, 9))}`);
     }
+  });
+
+  await step('query: result bar exports CSV and Parquet via save dialog', async () => {
+    await page().locator('.result-btn', { hasText: /^Export/ }).click();
+    await clickWithDialog(page().locator('.export-menu button', { hasText: /^CSV/ }), EXPORT_Q_CSV);
+    await waitForFile(EXPORT_Q_CSV);
+    const csv = readFileSync(EXPORT_Q_CSV, 'utf8');
+    assert(csv.startsWith('Pclass,n,survived'), `unexpected csv header: ${csv.slice(0, 40)}`);
+    assertEq(csv.trim().split(/\r?\n/).length, 4, 'csv data rows');
+
+    await page().locator('.result-btn', { hasText: /^Export/ }).click();
+    await clickWithDialog(page().locator('.export-menu button', { hasText: /^Parquet/ }), EXPORT_Q_PQ);
+    await waitForFile(EXPORT_Q_PQ);
+    const head = readFileSync(EXPORT_Q_PQ).subarray(0, 4).toString('latin1');
+    assertEq(head, 'PAR1', 'parquet magic');
+
+    check('query: result exports CSV + Parquet', true, 'both files written');
   });
 
   await step('query: cross-file join top row Toys / 12337500', async () => {
@@ -309,6 +330,13 @@ try {
     const snap = await runSql('SELECT * FROM sample_large', { timeout: 90000 });
     assert(snap.error, 'expected an error bar');
     assert(/more than 100000|LIMIT/i.test(snap.error), `unexpected error: ${snap.error}`);
+  });
+
+  await step('query error does not break sidebar previews', async () => {
+    // Regression: after a failed query the preview path used to go dead ("no data anywhere").
+    await previewTable('iris', { expectRows: 150 });
+    await previewTable('bank_failures', { expectRows: 500 });
+    check('query error leaves sidebar previews working', true, 'iris + bank_failures previewed');
   });
 
   await step('query: history lists recent queries and restores text', async () => {
@@ -479,9 +507,11 @@ try {
     let cancelOut = '';
     let dialogShown = false;
     try {
-      const cancelRun = await withConfirm('dismiss', () => page().keyboard.press('Delete'));
-      cancelOut = cancelRun.helper.output.replace(/\s+/g, ' ').slice(0, 180);
-      dialogShown = /CONFIRM_FOUND/.test(cancelOut);
+      const before = ((await dialogQueueState())?.log ?? []).length;
+      await withConfirm('dismiss', () => page().keyboard.press('Delete'));
+      const fresh = ((await dialogQueueState())?.log ?? []).slice(before);
+      cancelOut = `seam log: ${fresh.join(' | ')}`;
+      dialogShown = fresh.some((l) => l.startsWith('confirm:false:'));
     } catch (e) {
       cancelOut = (msgsOf(e) || String(e)).replace(/\s+/g, ' ').slice(0, 180);
     }
@@ -512,9 +542,11 @@ try {
 
     // accept path: accepting the confirmation deletes the row
     await page().locator(rowSel).click();
-    const acceptRun = await withConfirm('accept', () => page().keyboard.press('Delete'));
-    const acceptOut = acceptRun.helper.output.replace(/\s+/g, ' ').slice(0, 180);
-    check('delete-row accepted performs the delete', /CONFIRM_FOUND/.test(acceptOut), acceptOut);
+    const beforeAccept = ((await dialogQueueState())?.log ?? []).length;
+    await withConfirm('accept', () => page().keyboard.press('Delete'));
+    const acceptLog = ((await dialogQueueState())?.log ?? []).slice(beforeAccept);
+    const acceptOut = `seam log: ${acceptLog.join(' | ')}`;
+    check('delete-row accepted performs the delete', acceptLog.some((l) => l.startsWith('confirm:true:')), acceptOut);
     await waitForRows(1000, 1000);
     check('delete-row accepted removes the row (1000)', true);
 
@@ -572,7 +604,7 @@ try {
   await step('panel: context menu Query table gives 500-row read-only preview', async () => {
     await ctxMenuOnTable('titanic');
     await clickCtx('Query table');
-    await page().waitForSelector('.result-info');
+    await page().waitForSelector('.grid .cell-value');
     await waitForRows(500, 500);
     assert((await statusInfo()).queryBadge, 'query badge missing');
     assert(await page().locator('.readonly-badge').isVisible(), 'read-only badge missing');
@@ -661,9 +693,11 @@ try {
     let cancelOut = '';
     let dialogShown = false;
     try {
-      const cancelRun = await withConfirm('dismiss', () => clickCtx('Remove from workspace'));
-      cancelOut = cancelRun.helper.output.replace(/\s+/g, ' ').slice(0, 180);
-      dialogShown = /CONFIRM_FOUND/.test(cancelOut);
+      const before = ((await dialogQueueState())?.log ?? []).length;
+      await withConfirm('dismiss', () => clickCtx('Remove from workspace'));
+      const fresh = ((await dialogQueueState())?.log ?? []).slice(before);
+      cancelOut = `seam log: ${fresh.join(' | ')}`;
+      dialogShown = fresh.some((l) => l.startsWith('confirm:false:'));
     } catch (e) {
       cancelOut = (msgsOf(e) || String(e)).replace(/\s+/g, ' ').slice(0, 180);
     }
@@ -697,9 +731,11 @@ try {
     check('remove-table dismissed keeps the sidebar entry', true);
 
     await ctxMenuOnTable('customers');
-    const acceptRun = await withConfirm('accept', () => clickCtx('Remove from workspace'));
-    const acceptOut = acceptRun.helper.output.replace(/\s+/g, ' ').slice(0, 180);
-    check('remove-table accepted removes the sidebar entry', /CONFIRM_FOUND/.test(acceptOut), acceptOut);
+    const beforeRemove = ((await dialogQueueState())?.log ?? []).length;
+    await withConfirm('accept', () => clickCtx('Remove from workspace'));
+    const removeLog = ((await dialogQueueState())?.log ?? []).slice(beforeRemove);
+    const acceptOut = `seam log: ${removeLog.join(' | ')}`;
+    check('remove-table accepted removes the sidebar entry', removeLog.some((l) => l.startsWith('confirm:true:')), acceptOut);
     await poll(async () => !(await tableNames()).includes('customers'), { label: 'remove to apply' });
   });
 
@@ -818,6 +854,20 @@ try {
     assertEq(info.values.age, T.ageAfter, 'saved age');
     assertEq((await statusInfo()).modified, false, 'reopened file marked modified');
     check('lite: saved parquet persisted all editor changes', true);
+  });
+
+  await step('lite: Open Folder on a mixed-schema folder unions files', async () => {
+    // Regression: sales/ files have different schemas; the glob read used to fail silently.
+    await page().locator('.tb-btn', { hasText: 'Open' }).first().click();
+    await page().waitForSelector('.tb-dropdown');
+    await clickWithDialog(
+      page().locator('.tb-dropdown .menu-item', { hasText: 'Open Folder…' }),
+      SALES_DIR
+    );
+    await waitForRows(10_000, 420_200);
+    const st = await statusInfo();
+    assertEq(st.totalRows, 420_200, 'union row count');
+    check('lite: mixed-schema folder open unions file rows', true, `${st.totalRows} rows`);
   });
 
   // ================================ H. robustness + cleanup

@@ -130,134 +130,80 @@ export function dialogsSeen() {
   return S.dialogs.slice();
 }
 
-// ---------------------------------------------------------------- dialogs
+// ---------------------------------------------------------------- dialogs (in-app seam)
+//
+// DEV builds route every open/save/confirm through src/lib/dialogs.ts, which
+// consumes a queue set here via page.evaluate while running under E2E. No OS
+// dialogs are involved, so no PowerShell/keystroke automation is needed.
 
-function spawnPwshHelper(scriptArgs, okMarker) {
-  const args = ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ...scriptArgs];
-  const proc = spawn('powershell.exe', args, { cwd: ROOT, windowsHide: true });
-  let output = '';
-  proc.stdout.on('data', (d) => (output += d.toString()));
-  proc.stderr.on('data', (d) => (output += d.toString()));
-  const done = new Promise((resolve) => {
-    proc.on('close', (code) => {
-      S.helpers.delete(helper);
-      resolve({ code, ok: code === 0 && output.includes(okMarker), output: output.trim() });
-    });
-    proc.on('error', (err) => {
-      S.helpers.delete(helper);
-      resolve({ code: -1, ok: false, output: String(err) });
-    });
+async function pushQueue(kind, items) {
+  await getPage().evaluate(
+    ({ kind, items }) => {
+      const w = window;
+      w.__pqDialogOverride ||= { files: [], confirms: [], log: [] };
+      w.__pqDialogOverride[kind].push(...items);
+    },
+    { kind, items }
+  );
+}
+
+/** Queue paths (or null for a cancel) for the next pickOpen/pickSave calls. */
+export function queueFile(...paths) {
+  return pushQueue('files', paths);
+}
+
+/** Queue boolean answers for the next confirmDialog calls. */
+export function queueConfirm(...answers) {
+  return pushQueue('confirms', answers);
+}
+
+export async function dialogQueueState() {
+  return getPage().evaluate(() => {
+    const o = window.__pqDialogOverride;
+    return o ? { files: o.files.length, confirms: o.confirms.length, log: [...o.log] } : null;
   });
-  const helper = {
-    proc,
-    done,
-    get output() {
-      return output;
-    },
-    kill() {
-      try {
-        proc.kill();
-      } catch {
-        /* already gone */
-      }
-    },
-  };
-  S.helpers.add(helper);
-  return helper;
 }
 
-export function spawnAutoDialog(filePath, { timeoutSec = 30 } = {}) {
-  return spawnPwshHelper(
-    [path.join(HERE, 'auto-dialog.ps1'), '-FilePath', filePath, '-TimeoutSec', String(timeoutSec)],
-    'DIALOG_OK'
-  );
-}
-
-export function spawnConfirmDialog(action = 'accept', { timeoutSec = 20 } = {}) {
-  return spawnPwshHelper(
-    [path.join(HERE, 'confirm-dialog.ps1'), '-Action', action, '-TimeoutSec', String(timeoutSec)],
-    'CONFIRM_FOUND'
-  );
-}
-
-export function killAllHelpers() {
-  for (const h of S.helpers) h.kill();
+export async function killAllHelpers() {
   S.helpers.clear();
+  try {
+    await getPage().evaluate(() => {
+      if (window.__pqDialogOverride) {
+        window.__pqDialogOverride = { files: [], confirms: [], log: [] };
+      }
+    });
+  } catch {
+    /* page may be gone */
+  }
 }
 
-/** Press Escape on any leftover native #32770 dialogs (cleanup after failed dialog runs). */
+/** Compatibility shim: with the seam there are no native dialogs left to escape. */
 export async function escapeNativeDialogs() {
-  const proc = spawn(
-    'powershell.exe',
-    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(HERE, 'close-dialogs.ps1')],
-    { cwd: ROOT, windowsHide: true }
-  );
-  let out = '';
-  proc.stdout.on('data', (d) => (out += d.toString()));
-  proc.stderr.on('data', (d) => (out += d.toString()));
-  await new Promise((resolve) => proc.on('close', resolve));
-  return out.trim();
+  return 'dialog seam active (no native dialogs)';
 }
 
-async function awaitDialog(helper, ms = 45000) {
-  const res = await withTimeout(helper.done, ms, 'native dialog');
-  if (!res.ok) {
-    throw new Error(`auto-dialog failed (exit ${res.code}): ${res.output.slice(-200)}`);
-  }
-  return res;
+/** Queue the file the flow will pick, then run `flow` (which opens the picker). */
+export async function withDialog(filePath, flow, { flowTimeout = 40000 } = {}) {
+  await queueFile(filePath);
+  const res = await withTimeout(Promise.resolve().then(flow), flowTimeout, 'flow');
+  return { res, helper: { ok: true, output: `seam queued: ${filePath}` } };
 }
 
-/** Spawn the native-dialog helper, then run `flow` (which must open the dialog). */
-export async function withDialog(filePath, flow, { flowTimeout = 40000, dialogTimeout = 45000 } = {}) {
-  const helper = spawnAutoDialog(filePath);
-  try {
-    const [res, helperRes] = await Promise.all([
-      withTimeout(Promise.resolve().then(flow), flowTimeout, 'flow'),
-      awaitDialog(helper, dialogTimeout),
-    ]);
-    return { res, helper: helperRes };
-  } catch (e) {
-    helper.kill();
-    throw e;
-  }
-}
-
-/** Spawn the helper, click a UI element that opens a native dialog, await DIALOG_OK. */
-export async function clickWithDialog(locator, filePath, { dialogTimeout = 45000 } = {}) {
-  const helper = spawnAutoDialog(filePath);
-  try {
-    await locator.click();
-    return await awaitDialog(helper, dialogTimeout);
-  } catch (e) {
-    helper.kill();
-    throw e;
-  }
-}
-
-async function awaitConfirmHelper(helper, ms = 30000) {
-  const res = await withTimeout(helper.done, ms, 'confirm dialog');
-  if (!res.ok) {
-    throw new Error(`confirm-dialog helper failed (exit ${res.code}): ${res.output.slice(-200)}`);
-  }
-  return res;
+/** Queue the file, click a UI element that opens the picker, then let the flow run. */
+export async function clickWithDialog(locator, filePath) {
+  await queueFile(filePath);
+  await locator.click();
+  return { ok: true, output: `seam queued: ${filePath}` };
 }
 
 /**
- * Spawn the native confirm helper, then run `flow` (which triggers window.confirm via the
- * tauri-plugin-dialog shim). Resolves once both the flow and the dialog handling succeed.
+ * Queue the answer for the app's confirmDialog, then run `flow` (which triggers it).
+ * Mirrors the old helper's return shape for callers.
  */
-export async function withConfirm(action, flow, { flowTimeout = 30000, dialogTimeout = 30000 } = {}) {
-  const helper = spawnConfirmDialog(action);
-  try {
-    const [res, helperRes] = await Promise.all([
-      withTimeout(Promise.resolve().then(flow), flowTimeout, 'confirm flow'),
-      awaitConfirmHelper(helper, dialogTimeout),
-    ]);
-    return { res, helper: helperRes };
-  } catch (e) {
-    helper.kill();
-    throw e;
-  }
+export async function withConfirm(action, flow, { flowTimeout = 30000 } = {}) {
+  await queueConfirm(action === 'accept');
+  const res = await withTimeout(Promise.resolve().then(flow), flowTimeout, 'confirm flow');
+  return { res, helper: { ok: true, output: `seam confirm: ${action}` } };
 }
 
 // ---------------------------------------------------------------- flows / page svc
@@ -328,8 +274,21 @@ export async function editorText() {
   return normalizeText(await getPage().locator('.cm-content').textContent());
 }
 
+/** If the Query tab isn't rendered (Data is the default view), switch to it. */
+export async function ensureQueryTab() {
+  const page = getPage();
+  if ((await page.locator('.cm-content').count()) === 0) {
+    const tab = page.locator('[role=tab]', { hasText: 'Query' }).first();
+    if (await tab.count()) {
+      await tab.click();
+      await page.waitForSelector('.cm-content');
+    }
+  }
+}
+
 export async function typeSql(sql) {
   const page = getPage();
+  await ensureQueryTab();
   await page.locator('.cm-content').click();
   await page.keyboard.press('Control+a');
   await page.keyboard.type(sql);
@@ -348,6 +307,7 @@ export async function snapshotQuery() {
 
 export async function runQuery({ timeout = 45000 } = {}) {
   const page = getPage();
+  await ensureQueryTab();
   await ensureRunTicks();
   const prev = await snapshotQuery();
   const base = await page.evaluate(() => window.__pqRunTicks ?? 0);
@@ -374,6 +334,7 @@ export async function runSql(sql, opts) {
 }
 
 export async function historyItems() {
+  await ensureQueryTab();
   return getPage().locator('.history-item').allTextContents();
 }
 
@@ -547,20 +508,18 @@ export async function tableEntry(name) {
 
 export async function previewTable(name, { timeout = 25000, expectRows = null } = {}) {
   const page = getPage();
-  const before = await page.evaluate(
-    () => document.querySelector('.result-info span')?.textContent ?? null
-  );
   const entry = await tableEntry(name);
   await entry.click();
-  await page.waitForSelector('.results .grid .cell-value', { timeout });
+  await page.waitForSelector('.grid .cell-value', { timeout });
   await page.waitForFunction(
-    ({ b, want }) => {
-      const t = document.querySelector('.result-info span')?.textContent ?? null;
-      if (t === null) return false;
-      if (want != null) return t.startsWith(String(want));
-      return t !== b;
+    (want) => {
+      const m = (document.querySelector('.statusbar')?.textContent ?? '')
+        .replace(/,/g, '')
+        .match(/(\d+) of (\d+) rows/);
+      if (!m) return false;
+      return want == null ? Number(m[1]) > 0 : Number(m[1]) === want;
     },
-    { b: before, want: expectRows },
+    expectRows,
     { timeout }
   );
 }
