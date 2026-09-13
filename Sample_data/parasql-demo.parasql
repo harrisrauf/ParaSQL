@@ -3,122 +3,12 @@
   "name": "ParaSQL demo",
   "tables": [
     {
-      "name": "bank_failures",
-      "path": "bank_failures.parquet",
-      "source": "file",
-      "mode": "query",
-      "compression": null,
-      "size": 23162,
-      "mtime": null,
-      "missing": false
-    },
-    {
-      "name": "iris",
-      "path": "iris.parquet",
-      "source": "file",
-      "mode": "query",
-      "compression": null,
-      "size": 2448,
-      "mtime": null,
-      "missing": false
-    },
-    {
-      "name": "sample_empty",
-      "path": "sample-empty.parquet",
-      "source": "file",
-      "mode": "query",
-      "compression": null,
-      "size": 621,
-      "mtime": null,
-      "missing": false
-    },
-    {
-      "name": "sample_gzip",
-      "path": "sample-gzip.parquet",
-      "source": "file",
-      "mode": "query",
-      "compression": null,
-      "size": 315900,
-      "mtime": null,
-      "missing": false
-    },
-    {
-      "name": "sample_large",
-      "path": "sample-large.parquet",
-      "source": "file",
-      "mode": "query",
-      "compression": null,
-      "size": 5163357,
-      "mtime": null,
-      "missing": false
-    },
-    {
-      "name": "sample_nested",
-      "path": "sample-nested.parquet",
-      "source": "file",
-      "mode": "query",
-      "compression": null,
-      "size": 2532,
-      "mtime": null,
-      "missing": false
-    },
-    {
-      "name": "sample_types",
-      "path": "sample-types.parquet",
-      "source": "file",
-      "mode": "query",
-      "compression": null,
-      "size": 4344,
-      "mtime": null,
-      "missing": false
-    },
-    {
-      "name": "sample_uncompressed",
-      "path": "sample-uncompressed.parquet",
-      "source": "file",
-      "mode": "query",
-      "compression": null,
-      "size": 1441167,
-      "mtime": null,
-      "missing": false
-    },
-    {
-      "name": "sample_users",
-      "path": "sample-users.parquet",
-      "source": "file",
-      "mode": "query",
-      "compression": null,
-      "size": 29811,
-      "mtime": null,
-      "missing": false
-    },
-    {
-      "name": "search_trends",
-      "path": "search_trends.parquet",
-      "source": "file",
-      "mode": "query",
-      "compression": null,
-      "size": 5083,
-      "mtime": null,
-      "missing": false
-    },
-    {
-      "name": "titanic",
-      "path": "titanic.parquet",
-      "source": "file",
-      "mode": "query",
-      "compression": null,
-      "size": 40013,
-      "mtime": null,
-      "missing": false
-    },
-    {
       "name": "products",
       "path": "sales/products.parquet",
       "source": "file",
       "mode": "query",
       "compression": null,
-      "size": null,
+      "size": 1650,
       "mtime": null,
       "missing": false
     },
@@ -128,7 +18,7 @@
       "source": "file",
       "mode": "query",
       "compression": null,
-      "size": null,
+      "size": 58066,
       "mtime": null,
       "missing": false
     },
@@ -138,7 +28,7 @@
       "source": "file",
       "mode": "query",
       "compression": null,
-      "size": null,
+      "size": 281805,
       "mtime": null,
       "missing": false
     },
@@ -148,7 +38,7 @@
       "source": "file",
       "mode": "query",
       "compression": null,
-      "size": null,
+      "size": 453982,
       "mtime": null,
       "missing": false
     }
@@ -160,11 +50,11 @@
     },
     {
       "name": "Monthly revenue",
-      "sql": "SELECT strftime(o.order_date, '%Y-%m') AS month, ROUND(SUM(oi.quantity * p.unit_price), 2) AS revenue FROM orders o JOIN order_items oi ON oi.order_id = o.order_id JOIN products p ON p.product_id = oi.product_id GROUP BY 1 ORDER BY 1"
+      "sql": "SELECT strftime(o.order_date, '%Y-%m') AS month, ROUND(SUM(oi.quantity * oi.unit_price), 2) AS revenue FROM orders o JOIN order_items oi ON oi.order_id = o.order_id JOIN products p ON p.product_id = oi.product_id GROUP BY 1 ORDER BY 1"
     },
     {
-      "name": "Titanic survival by class",
-      "sql": "SELECT Pclass, COUNT(*) AS total, SUM(CASE WHEN Survived = 1 THEN 1 ELSE 0 END) AS survived FROM titanic GROUP BY Pclass ORDER BY Pclass"
+      "name": "Top customers",
+      "sql": "SELECT c.name, c.country, ROUND(SUM(oi.quantity * oi.unit_price), 2) AS revenue FROM order_items oi JOIN orders o ON o.order_id = oi.order_id JOIN customers c ON c.customer_id = o.customer_id GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 10"
     }
   ],
   "charts": [],

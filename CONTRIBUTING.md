@@ -45,7 +45,7 @@ builds are incremental.
 ```bash
 npm run check                 # svelte-check (TypeScript + Svelte)
 npm run build                 # production frontend build
-cd src-tauri && cargo test --lib   # Rust unit tests (45+)
+cd src-tauri && cargo test --lib   # Rust unit tests
 ```
 
 All three run in CI on every push and PR.
@@ -56,7 +56,7 @@ All three run in CI on every push and PR.
 src/                     Svelte 5 frontend (runes)
   lib/actions.ts         user flows (open/save/export/edit/workspace)
   lib/commands.ts        typed Tauri IPC wrappers
-  lib/dialogs.ts         DEV-only dialog seam used by E2E tests
+  lib/dialogs.ts         DEV-only dialog seam (scripted dialogs for tests)
   lib/stores/            rune-based stores (table, workspace, settings, ui)
   lib/components/        DataGrid, SqlEditor, MenuBar, WorkspacePanel, …
 src-tauri/src/
@@ -64,8 +64,7 @@ src-tauri/src/
   engine/duckdb.rs       DuckDB engine: open, query, edit, undo, export
   engine/catalog.rs      .parasql workspace model (portable paths)
   engine/engine_test.rs  Rust unit tests
-e2e/                     Playwright-over-CDP suites (see e2e/README.md)
-Sample_data/             demo parquet files + demo workspace
+Sample_data/             demo workspace (sales fixtures + parasql-demo.parasql)
 ```
 
 ### How the layers talk
@@ -108,26 +107,12 @@ Rules of thumb:
 - **Commits**: imperative, scoped, e.g.
   `Fix undo totals after row insert` or `Add Excel overflow guard`.
 
-## Running the E2E suites
-
-The E2E harness attaches Playwright to the app's WebView2 over CDP and uses a
-DEV-only dialog seam, so no native file dialogs are involved:
-
-```bash
-npm run dev:e2e       # terminal 1 — starts the app with CDP enabled
-npm run e2e:smoke     # terminal 2 — 12 checks, ~5s
-npm run e2e:deep      # ~107 checks, ~30s
-```
-
-See [`e2e/README.md`](e2e/README.md) for details (the WebView2 profile path in
-`src-tauri/tauri.e2e.conf.json` is machine-specific).
-
 ## Pull request checklist
 
 - [ ] `npm run check` passes
 - [ ] `npm run build` passes
 - [ ] `cargo test --lib` passes
-- [ ] New behavior is covered by a test (Rust unit or E2E)
+- [ ] New behavior is covered by a Rust unit test
 - [ ] No telemetry, no network calls, no new capabilities without discussion
 - [ ] README/docs updated if user-visible behavior changed
 
