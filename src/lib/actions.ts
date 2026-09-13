@@ -1,5 +1,5 @@
 import { get } from 'svelte/store';
-import { open, save } from '@tauri-apps/plugin-dialog';
+import { open, save, confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
 import * as cmds from './commands';
 import { tableStore, displayedRows, selectedRowIds, initialLoadThreshold } from './stores/table';
 import { settings } from './stores/settings';
@@ -41,9 +41,9 @@ export function endMutation(): void {
 }
 
 /** Confirm discarding unsaved edits before replacing the loaded engine. */
-export function confirmDiscardChanges(): boolean {
+export async function confirmDiscardChanges(): Promise<boolean> {
   if (!get(tableStore).modified) return true;
-  return confirm('You have unsaved changes. Discard them?');
+  return await confirmDialog('You have unsaved changes. Discard them?');
 }
 
 async function writeClipboard(text: string): Promise<void> {
@@ -57,7 +57,7 @@ async function writeClipboard(text: string): Promise<void> {
 // --- File flows ---
 
 export async function openFileFlow(path?: string): Promise<boolean> {
-  if (!confirmDiscardChanges()) return false;
+  if (!(await confirmDiscardChanges())) return false;
   let selected = path;
   if (!selected) {
     const res = await open({
@@ -80,7 +80,7 @@ export async function openFileFlow(path?: string): Promise<boolean> {
 }
 
 export async function openFolderFlow(): Promise<boolean> {
-  if (!confirmDiscardChanges()) return false;
+  if (!(await confirmDiscardChanges())) return false;
   const selected = await open({ directory: true, multiple: false });
   if (!selected) return false;
   const meta = await cmds.openFolder(selected);
@@ -164,6 +164,7 @@ export async function undoFlow(): Promise<void> {
       ...s,
       rows,
       columns,
+      totalRows: rows.length,
       sqlResult: null,
       savedTable: null,
       selection: { anchor: null, cells: new Set(), allRows: false },
@@ -193,6 +194,7 @@ export async function redoFlow(): Promise<void> {
       ...s,
       rows,
       columns,
+      totalRows: rows.length,
       sqlResult: null,
       savedTable: null,
       selection: { anchor: null, cells: new Set(), allRows: false },
@@ -212,7 +214,7 @@ export async function deleteSelectedFlow(): Promise<boolean> {
   if (!get(tableStore).editable) return false;
   const ids = [...get(selectedRowIds)];
   if (ids.length === 0) return false;
-  if (!confirm(`Delete ${ids.length} row(s)?`)) return false;
+  if (!(await confirmDialog(`Delete ${ids.length} row(s)?`))) return false;
   if (!tryBeginMutation()) return false;
   try {
     await cmds.deleteRows(ids);
@@ -422,7 +424,7 @@ async function persist(doc: Workspace, path: string): Promise<Workspace> {
 }
 
 export async function newWorkspaceFlow(): Promise<boolean> {
-  if (!confirmDiscardChanges()) return false;
+  if (!(await confirmDiscardChanges())) return false;
   const selected = await save({ filters: PARASQL_FILTER });
   if (!selected) return false;
   try {
@@ -443,7 +445,7 @@ export async function newWorkspaceFlow(): Promise<boolean> {
 }
 
 export async function openWorkspaceFlow(path?: string): Promise<boolean> {
-  if (!confirmDiscardChanges()) return false;
+  if (!(await confirmDiscardChanges())) return false;
   let selected = path;
   if (!selected) {
     const res = await open({ multiple: false, filters: PARASQL_FILTER });
@@ -656,7 +658,7 @@ export async function openEditorFlow(name: string): Promise<boolean> {
 
   // Opening another editor discards unsaved edits in the current one.
   if (s.editorOpen && get(tableStore).modified) {
-    if (!confirm('The open editor has unsaved changes. Discard them?')) return false;
+    if (!(await confirmDialog('The open editor has unsaved changes. Discard them?'))) return false;
   }
 
   const path = table.abs_path ?? table.path;
@@ -664,7 +666,7 @@ export async function openEditorFlow(name: string): Promise<boolean> {
     const res = await cmds.openTableForEdit(name, path, false, doc);
     if (!res.opened) {
       if (!res.over_limit) return false;
-      const ok = confirm(
+      const ok = await confirmDialog(
         `"${name}" is ${res.size_mb} MB. Editing loads the full table into memory ` +
         'and saving rewrites the whole file. Open anyway?'
       );

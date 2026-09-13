@@ -1,0 +1,190 @@
+{
+  "version": 1,
+  "name": "ParaSQL demo",
+  "tables": [
+    {
+      "name": "bank_failures",
+      "path": "bank_failures.parquet",
+      "source": "file",
+      "mode": "query",
+      "compression": null,
+      "size": 23162,
+      "mtime": null,
+      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\bank_failures.parquet",
+      "missing": false
+    },
+    {
+      "name": "iris",
+      "path": "iris.parquet",
+      "source": "file",
+      "mode": "query",
+      "compression": null,
+      "size": 2448,
+      "mtime": null,
+      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\iris.parquet",
+      "missing": false
+    },
+    {
+      "name": "sample_empty",
+      "path": "sample-empty.parquet",
+      "source": "file",
+      "mode": "query",
+      "compression": null,
+      "size": 621,
+      "mtime": null,
+      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\sample-empty.parquet",
+      "missing": false
+    },
+    {
+      "name": "sample_gzip",
+      "path": "sample-gzip.parquet",
+      "source": "file",
+      "mode": "query",
+      "compression": null,
+      "size": 315900,
+      "mtime": null,
+      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\sample-gzip.parquet",
+      "missing": false
+    },
+    {
+      "name": "sample_large",
+      "path": "sample-large.parquet",
+      "source": "file",
+      "mode": "query",
+      "compression": null,
+      "size": 5163357,
+      "mtime": null,
+      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\sample-large.parquet",
+      "missing": false
+    },
+    {
+      "name": "sample_nested",
+      "path": "sample-nested.parquet",
+      "source": "file",
+      "mode": "query",
+      "compression": null,
+      "size": 2532,
+      "mtime": null,
+      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\sample-nested.parquet",
+      "missing": false
+    },
+    {
+      "name": "sample_types",
+      "path": "sample-types.parquet",
+      "source": "file",
+      "mode": "query",
+      "compression": null,
+      "size": 4344,
+      "mtime": null,
+      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\sample-types.parquet",
+      "missing": false
+    },
+    {
+      "name": "sample_uncompressed",
+      "path": "sample-uncompressed.parquet",
+      "source": "file",
+      "mode": "query",
+      "compression": null,
+      "size": 1441167,
+      "mtime": null,
+      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\sample-uncompressed.parquet",
+      "missing": false
+    },
+    {
+      "name": "sample_users",
+      "path": "sample-users.parquet",
+      "source": "file",
+      "mode": "query",
+      "compression": null,
+      "size": 29812,
+      "mtime": null,
+      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\sample-users.parquet",
+      "missing": false
+    },
+    {
+      "name": "search_trends",
+      "path": "search_trends.parquet",
+      "source": "file",
+      "mode": "query",
+      "compression": null,
+      "size": 5083,
+      "mtime": null,
+      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\search_trends.parquet",
+      "missing": false
+    },
+    {
+      "name": "titanic",
+      "path": "titanic.parquet",
+      "source": "file",
+      "mode": "query",
+      "compression": null,
+      "size": 40013,
+      "mtime": null,
+      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\titanic.parquet",
+      "missing": false
+    },
+    {
+      "name": "products",
+      "path": "sales/products.parquet",
+      "source": "file",
+      "mode": "query",
+      "compression": null,
+      "size": null,
+      "mtime": null,
+      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\sales\\products.parquet",
+      "missing": false
+    },
+    {
+      "name": "customers",
+      "path": "sales/customers.parquet",
+      "source": "file",
+      "mode": "query",
+      "compression": null,
+      "size": null,
+      "mtime": null,
+      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\sales\\customers.parquet",
+      "missing": false
+    },
+    {
+      "name": "orders",
+      "path": "sales/orders.parquet",
+      "source": "file",
+      "mode": "query",
+      "compression": null,
+      "size": null,
+      "mtime": null,
+      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\sales\\orders.parquet",
+      "missing": false
+    },
+    {
+      "name": "order_items",
+      "path": "sales/order_items.parquet",
+      "source": "file",
+      "mode": "query",
+      "compression": null,
+      "size": null,
+      "mtime": null,
+      "abs_path": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data\\sales\\order_items.parquet",
+      "missing": false
+    }
+  ],
+  "saved_queries": [
+    {
+      "name": "Revenue by category",
+      "sql": "SELECT p.category, ROUND(SUM(oi.quantity * p.unit_price), 2) AS revenue FROM order_items oi JOIN products p ON p.product_id = oi.product_id GROUP BY 1 ORDER BY 2 DESC"
+    },
+    {
+      "name": "Monthly revenue",
+      "sql": "SELECT strftime(o.order_date, '%Y-%m') AS month, ROUND(SUM(oi.quantity * p.unit_price), 2) AS revenue FROM orders o JOIN order_items oi ON oi.order_id = o.order_id JOIN products p ON p.product_id = oi.product_id GROUP BY 1 ORDER BY 1"
+    },
+    {
+      "name": "Titanic survival by class",
+      "sql": "SELECT Pclass, COUNT(*) AS total, SUM(CASE WHEN Survived = 1 THEN 1 ELSE 0 END) AS survived FROM titanic GROUP BY Pclass ORDER BY Pclass"
+    }
+  ],
+  "charts": [],
+  "dashboards": [],
+  "notebooks": [],
+  "edit_size_limit_mb": 2048,
+  "dir": "D:\\.projects\\paraquet Viewer\\src-tauri\\../Sample_data"
+}

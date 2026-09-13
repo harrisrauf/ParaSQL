@@ -8,6 +8,7 @@
   import { autocompletion } from '@codemirror/autocomplete';
   import { bracketMatching } from '@codemirror/language';
   import { tableStore } from '../stores/table';
+  import { workspaceStore } from '../stores/workspace';
   import { settings } from '../stores/settings';
   import { executeSql } from '../commands';
   import type { QueryResult } from '../types';
@@ -21,18 +22,32 @@
   let columns = $derived($tableStore.columns);
   let sqlResult = $derived($tableStore.sqlResult);
   let dark = $derived($settings.darkMode);
+  let wsTables = $derived($workspaceStore.doc?.tables ?? []);
 
   const themeCompartment = new Compartment();
   const schemaCompartment = new Compartment();
 
+  function defaultQueryText(): string {
+    if (wsTables.length > 0) {
+      const name = wsTables[0].name.replace(/"/g, '""');
+      return `SELECT * FROM "${name}" LIMIT 100;`;
+    }
+    return 'SELECT * FROM working LIMIT 100;';
+  }
+
+  function schemaConfig(): { schema: Record<string, string[]> } | undefined {
+    if (wsTables.length > 0) {
+      const schema: Record<string, string[]> = {};
+      for (const t of wsTables) schema[t.name] = [];
+      return { schema };
+    }
+    return columns.length > 0 ? { schema: { working: columns.map(col => col.name) } } : undefined;
+  }
+
   onMount(() => {
     if (!editorEl) return;
 
-    const schemaCompletion = sql({
-      schema: columns.length > 0 ? {
-        working: columns.map(col => col.name),
-      } : undefined,
-    });
+    const schemaCompletion = sql(schemaConfig());
 
     const runKeymap = keymap.of([{
       key: 'Mod-Enter',
@@ -40,7 +55,7 @@
     }]);
 
     const state = EditorState.create({
-      doc: 'SELECT * FROM working LIMIT 100;',
+      doc: defaultQueryText(),
       extensions: [
         history(),
         bracketMatching(),
@@ -80,9 +95,7 @@
   $effect(() => {
     const view = editorView;
     if (!view) return;
-    const schemaCompletion = sql({
-      schema: columns.length > 0 ? { working: columns.map(col => col.name) } : undefined,
-    });
+    const schemaCompletion = sql(schemaConfig());
     view.dispatch({ effects: schemaCompartment.reconfigure(schemaCompletion) });
   });
 
