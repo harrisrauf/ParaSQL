@@ -239,7 +239,6 @@
       <div class="welcome">
         <h1>ParaSQL</h1>
         <p>Open a .parquet file, or create a workspace to query many files as tables.</p>
-        <p class="subtitle">Powered by DuckDB — Full SQL support for Parquet files</p>
         <div class="welcome-actions">
           <button onclick={() => openFileFlow()} class="open-btn">Open File</button>
           <button onclick={() => openFolderFlow()} class="open-btn secondary">Open Folder</button>
@@ -344,12 +343,6 @@
     font-size: 14px;
   }
 
-  .welcome .subtitle {
-    font-size: 12px;
-    color: var(--text-secondary, #aaa);
-    margin-top: 4px;
-  }
-
   .welcome-actions {
     display: flex;
     gap: 12px;
@@ -361,7 +354,7 @@
     border: 1px solid var(--accent-color, #1a73e8);
     border-radius: 6px;
     background: var(--accent-color, #1a73e8);
-    color: white;
+    color: var(--accent-text, #fff);
     cursor: pointer;
     font-size: 14px;
     font-family: inherit;

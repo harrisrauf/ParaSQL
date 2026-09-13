@@ -24,6 +24,7 @@
     closeEditorFlow,
   } from '../actions';
   import { workspaceStore } from '../stores/workspace';
+  import HelpModal from './HelpModal.svelte';
 
   interface SubItem {
     label: string;
@@ -50,12 +51,14 @@
   let menubarEl = $state<HTMLElement | null>(null);
   let undoAvail = $state(false);
   let redoAvail = $state(false);
+  let helpOpen = $state(false);
 
   let modified = $derived($tableStore.modified);
   let selectedCount = $derived($selectedRowIds.size);
   let hasData = $derived($tableStore.columns.length > 0);
   let darkMode = $derived($settings.darkMode);
   let density = $derived($settings.rowDensity);
+  let theme = $derived($settings.theme);
   let sidebarVisible = $derived($uiStore.sidebarVisible);
   let recentFiles = $derived($settings.recentFiles);
   let wsDoc = $derived($workspaceStore.doc);
@@ -148,6 +151,21 @@
       items: [
         { label: 'Toggle Sidebar', action: () => uiStore.toggleSidebar() },
         { label: 'Dark Mode', action: () => settings.toggleDarkMode(), checked: darkMode },
+        {
+          label: 'Theme',
+          submenu: [
+            {
+              label: 'Simple',
+              checked: theme === 'simple',
+              action: () => settings.setTheme('simple'),
+            },
+            {
+              label: 'ParaSQL',
+              checked: theme === 'parasql',
+              action: () => settings.setTheme('parasql'),
+            },
+          ],
+        },
         { separator: true },
         {
           label: 'Row Density',
@@ -188,6 +206,7 @@
       id: 'help',
       label: 'Help',
       items: [
+        { label: 'How to Use ParaSQL', action: () => (helpOpen = true) },
         { label: 'About ParaSQL', action: () => alert('ParaSQL v0.2.0\nThe SQL workbench for Parquet files.\nPowered by DuckDB, built with Tauri + Svelte.') },
       ],
     },
@@ -293,6 +312,10 @@
     </div>
   {/each}
 </div>
+
+{#if helpOpen}
+  <HelpModal onClose={() => (helpOpen = false)} />
+{/if}
 
 <style>
   .menubar {

@@ -77,12 +77,13 @@
   .cell-editor {
     width: 100%;
     height: 100%;
-    border: 2px solid #1a73e8;
+    border: 2px solid var(--accent-color, #1a73e8);
     outline: none;
     padding: 2px 6px;
     font-size: 13px;
     font-family: inherit;
-    background: white;
+    background: var(--bg, #fff);
+    color: var(--text-primary, #333);
     box-sizing: border-box;
     border-radius: 2px;
   }

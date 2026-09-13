@@ -392,7 +392,7 @@
 
   .add-btn {
     background: var(--accent-color, #1a73e8);
-    color: white;
+    color: var(--accent-text, #fff);
   }
 
   .cancel-btn {
@@ -462,6 +462,7 @@
     flex: 1;
     border: 1px solid var(--border-color, #e0e0e0);
     background: var(--bg, #fff);
+    color: var(--text-primary, #333);
     border-radius: 3px;
     font-size: 12px;
     font-family: inherit;

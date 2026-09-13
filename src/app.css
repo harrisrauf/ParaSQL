@@ -20,6 +20,13 @@
   --code-bg: #f5f5f5;
   --scrollbar-thumb: #ddd;
   --scrollbar-thumb-hover: #bbb;
+  --accent-text: #ffffff;
+  --error-bg: #fef2f2;
+  --error-border: #fecaca;
+  --error-text: #991b1b;
+  --success-bg: #f2fdf2;
+  --success-border: #a5d6a5;
+  --success-text: #26682b;
 }
 
 :root.dark {
@@ -35,9 +42,60 @@
   --selected-bg: #264f78;
   --accent-color: #4fc3f7;
   --accent-hover: #81d4fa;
+  --accent-text: #001531;
   --code-bg: #1e1e1e;
   --scrollbar-thumb: #424242;
   --scrollbar-thumb-hover: #555555;
+  --error-bg: #3a1a1d;
+  --error-border: #63272c;
+  --error-text: #f2b8bd;
+  --success-bg: #14301c;
+  --success-border: #2c5c3c;
+  --success-text: #a8e6b8;
+}
+
+/* ParaSQL brand theme — light: white canvas, navy ink */
+:root.theme-parasql {
+  --bg: #ffffff;
+  --panel-bg: #f7f9fc;
+  --toolbar-bg: #f7f9fc;
+  --text-primary: #001531;
+  --text-secondary: #4a6180;
+  --border-color: #d9e2ec;
+  --border-subtle: #eef2f7;
+  --hover-bg: #eef3f9;
+  --selected-bg: #dbe7f6;
+  --accent-color: #001531;
+  --accent-hover: #0a2b57;
+  --accent-text: #ffffff;
+  --code-bg: #f4f7fb;
+  --scrollbar-thumb: #cdd8e5;
+  --scrollbar-thumb-hover: #aebfd3;
+}
+
+/* ParaSQL brand theme — dark: navy canvas, white ink */
+:root.theme-parasql.dark {
+  --bg: #001531;
+  --panel-bg: #041d3f;
+  --toolbar-bg: #031a38;
+  --text-primary: #ffffff;
+  --text-secondary: #9db3d1;
+  --border-color: #123055;
+  --border-subtle: #0a2246;
+  --hover-bg: #082850;
+  --selected-bg: #0f3868;
+  --accent-color: #ffffff;
+  --accent-hover: #dbe7f6;
+  --accent-text: #001531;
+  --code-bg: #02142e;
+  --scrollbar-thumb: #16345c;
+  --scrollbar-thumb-hover: #24507f;
+  --error-bg: #3d1020;
+  --error-border: #6e2038;
+  --error-text: #ffb3c1;
+  --success-bg: #05291f;
+  --success-border: #0d4a38;
+  --success-text: #8fe3c0;
 }
 
 html, body {
@@ -99,8 +157,31 @@ body {
   background-color: #264f78 !important;
 }
 
-/* Grid density */
-:global(.grid.compact) .grid-row,
-:global(.grid.compact) .col-header {
-  font-size: 12px;
+/* ParaSQL brand theme: tint CodeMirror to the navy palette */
+:root.theme-parasql.dark .cm-editor {
+  background-color: #001531;
 }
+
+:root.theme-parasql.dark .cm-gutters {
+  background-color: #041d3f;
+  border-right-color: #123055;
+  color: #7f97b8;
+}
+
+:root.theme-parasql.dark .cm-content {
+  color: #eaf1fa;
+}
+
+:root.theme-parasql.dark .cm-activeLine,
+:root.theme-parasql.dark .cm-activeLineGutter {
+  background-color: #082850;
+}
+
+:root.theme-parasql.dark .cm-selectionBackground {
+  background-color: #123f73 !important;
+}
+
+:root.theme-parasql.dark .cm-cursor {
+  border-left-color: #ffffff;
+}
+
