@@ -1,12 +1,15 @@
 [package]
-name = "parquet-viewer"
+name = "parasql"
 version = "0.2.0"
-description = "A Parquet file viewer and editor built with Tauri + DuckDB"
-authors = ["you"]
+description = "The SQL workbench for Parquet files — query, explore, edit, and export data from any folder of Parquet."
+authors = ["Harris Rauf"]
+license = "MIT"
+repository = "https://github.com/harrisrauf/ParaSQL"
+homepage = "https://github.com/harrisrauf/ParaSQL"
 edition = "2021"
 
 [lib]
-name = "parquet_viewer_lib"
+name = "parasql_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

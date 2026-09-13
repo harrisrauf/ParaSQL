@@ -30,7 +30,9 @@ function getDefaultSettings(): Settings {
 function loadSettings(): Settings {
   if (typeof window !== 'undefined') {
     try {
-      const saved = localStorage.getItem('parquet-viewer-settings');
+      const saved =
+        localStorage.getItem('parasql-settings') ??
+        localStorage.getItem('parquet-viewer-settings');
       if (saved) {
         return { ...getDefaultSettings(), ...JSON.parse(saved) };
       }
@@ -47,7 +49,7 @@ function createSettingsStore() {
 
   function save(settings: Settings) {
     if (typeof window !== 'undefined') {
-      localStorage.setItem('parquet-viewer-settings', JSON.stringify(settings));
+      localStorage.setItem('parasql-settings', JSON.stringify(settings));
       // Apply dark mode to document
       if (settings.darkMode) {
         document.documentElement.classList.add('dark');
