@@ -45,16 +45,25 @@
   }>({ show: false, x: 0, y: 0, value: '', colName: '', row: null, kind: 'cell' });
 
   function handleKeydown(e: KeyboardEvent) {
-    // Don't hijack shortcuts while typing in inputs, editors, or selects
     const target = e.target as HTMLElement | null;
     const tag = target?.tagName?.toLowerCase();
+    const mod = e.ctrlKey || e.metaKey;
+
+    // Save works everywhere — including while typing in the SQL editor or a cell
+    if (mod && (e.key === 's' || e.key === 'S')) {
+      e.preventDefault();
+      if ($workspaceStore.doc) saveWorkspaceFlow();
+      else if ($tableStore.filePath) saveFlow();
+      return;
+    }
+
+    // Don't hijack other shortcuts while typing in inputs, editors, or selects
     if (
       tag === 'input' || tag === 'textarea' || tag === 'select' ||
       target?.isContentEditable || !!target?.closest('.cm-editor')
     ) {
       return;
     }
-    const mod = e.ctrlKey || e.metaKey;
     if (e.key === 'Escape') {
       closeContextMenu();
       return;
@@ -69,13 +78,6 @@
     if (mod && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
       e.preventDefault();
       if (editable) redoFlow();
-      return;
-    }
-    // Save: Ctrl+S (a workspace document takes precedence when one is open)
-    if (mod && e.key === 's') {
-      e.preventDefault();
-      if ($workspaceStore.doc) saveWorkspaceFlow();
-      else saveFlow();
       return;
     }
     // Copy: Ctrl+C (with grid focus)
