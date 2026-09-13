@@ -6,18 +6,21 @@
   import { sql, MySQL, PostgreSQL } from '@codemirror/lang-sql';
   import { oneDark } from '@codemirror/theme-one-dark';
   import { autocompletion } from '@codemirror/autocomplete';
-  import { bracketMatching } from '@codemirror/language';
+  import { bracketMatching, syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language';
   import { tableStore } from '../stores/table';
   import { workspaceStore } from '../stores/workspace';
   import { settings } from '../stores/settings';
+  import { queryHistoryStore } from '../stores/ui';
   import { executeSql } from '../commands';
+  import { copyAllResultToClipboard, exportResultFlow } from '../actions';
   import type { QueryResult } from '../types';
 
   let editorEl: HTMLDivElement | undefined = $state();
   let editorView: EditorView | undefined = $state();
   let isRunning = $state(false);
   let lastError = $state('');
-  let queryHistory = $state<string[]>([]);
+  let queryHistory = $derived($queryHistoryStore);
+  let exportOpen = $state(false);
 
   let columns = $derived($tableStore.columns);
   let sqlResult = $derived($tableStore.sqlResult);
@@ -26,6 +29,7 @@
 
   const themeCompartment = new Compartment();
   const schemaCompartment = new Compartment();
+  const lightTheme = [syntaxHighlighting(defaultHighlightStyle, { fallback: true })];
 
   function defaultQueryText(): string {
     if (wsTables.length > 0) {
@@ -64,7 +68,7 @@
         ph('Type SQL query... (Ctrl+Enter to run)'),
         runKeymap,
         keymap.of([...defaultKeymap, ...historyKeymap]),
-        themeCompartment.of(dark ? oneDark : []),
+        themeCompartment.of(dark ? oneDark : lightTheme),
         EditorView.lineWrapping,
         EditorView.theme({
           '&': { fontSize: '13px', minHeight: '80px', maxHeight: '200px', overflow: 'auto' },
@@ -88,7 +92,7 @@
   $effect(() => {
     const view = editorView;
     if (!view) return;
-    view.dispatch({ effects: themeCompartment.reconfigure(dark ? oneDark : []) });
+    view.dispatch({ effects: themeCompartment.reconfigure(dark ? oneDark : lightTheme) });
   });
 
   // Refresh schema completions when columns change (file opened, schema edited)
@@ -110,10 +114,10 @@
 
     try {
       const result = await executeSql(sql_text);
-      tableStore.applyQueryResult(result);
+      tableStore.applyQueryResult(result, sql_text);
 
       // Add to history
-      queryHistory = [sql_text, ...queryHistory.filter(q => q !== sql_text)].slice(0, 20);
+      queryHistoryStore.push(sql_text);
 
       // Switch to data view to show results
       tableStore.setActiveTab('data');
@@ -162,8 +166,21 @@
 
   {#if sqlResult}
     <div class="result-info">
-      <span>{sqlResult.rows.length} rows returned</span>
-      <button class="clear-btn" onclick={clearResults}>Clear results</button>
+      <span class="result-count">{sqlResult.rows.length} rows returned</span>
+      <div class="result-actions">
+        <button class="result-btn" onclick={copyAllResultToClipboard}>Copy all</button>
+        <div class="export-wrap">
+          <button class="result-btn" onclick={() => (exportOpen = !exportOpen)}>Export ▾</button>
+          {#if exportOpen}
+            <div class="export-menu">
+              <button onclick={() => { exportOpen = false; exportResultFlow('csv'); }}>CSV (.csv)</button>
+              <button onclick={() => { exportOpen = false; exportResultFlow('excel'); }}>Excel (.xlsx)</button>
+              <button onclick={() => { exportOpen = false; exportResultFlow('parquet'); }}>Parquet (.parquet)</button>
+            </div>
+          {/if}
+        </div>
+        <button class="clear-btn" onclick={clearResults}>Clear Results</button>
+      </div>
     </div>
   {/if}
 
@@ -263,22 +280,89 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 8px;
     padding: 4px 10px;
-    background: #f0fdf4;
-    border-top: 1px solid #bbf7d0;
+    border-top: 1px solid var(--border-color, #e0e0e0);
+    background: transparent;
     font-size: 11px;
-    color: #166534;
+    color: var(--text-secondary, #888);
+  }
+
+  .result-count {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+  }
+
+  .result-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .result-btn {
+    padding: 2px 8px;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    background: none;
+    cursor: pointer;
+    font-size: 11px;
+    font-family: inherit;
+    color: var(--text-secondary, #777);
+  }
+
+  .result-btn:hover {
+    border-color: var(--border-color, #ddd);
+    background: var(--hover-bg, #f5f5f5);
+    color: var(--text-primary, #333);
+  }
+
+  .export-wrap {
+    position: relative;
+  }
+
+  .export-menu {
+    position: absolute;
+    right: 0;
+    top: 100%;
+    margin-top: 2px;
+    min-width: 140px;
+    background: var(--bg, #fff);
+    border: 1px solid var(--border-color, #e0e0e0);
+    border-radius: 6px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+    padding: 4px 0;
+    z-index: 30;
+  }
+
+  .export-menu button {
+    display: block;
+    width: 100%;
+    border: none;
+    background: none;
+    padding: 6px 12px;
+    text-align: left;
+    font-size: 12px;
+    font-family: inherit;
+    color: var(--text-primary, #333);
+    cursor: pointer;
+  }
+
+  .export-menu button:hover {
+    background: var(--hover-bg, #f0f0f0);
   }
 
   .clear-btn {
-    padding: 2px 8px;
-    border: 1px solid #bbf7d0;
-    border-radius: 3px;
-    background: white;
+    padding: 3px 12px;
+    border: 1px solid var(--border-color, #ddd);
+    border-radius: 4px;
+    background: var(--panel-bg, #fff);
     cursor: pointer;
-    font-size: 10px;
-    color: #166534;
+    font-size: 11px;
+    color: var(--text-primary, #333);
     font-family: inherit;
+  }
+
+  .clear-btn:hover {
+    background: var(--hover-bg, #f0f0f0);
   }
 
   .history-section {

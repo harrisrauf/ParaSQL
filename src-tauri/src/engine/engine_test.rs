@@ -207,6 +207,30 @@ fn failed_mutation_leaves_engine_usable() {
 }
 
 #[test]
+fn parser_error_leaves_engine_usable() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("sample.parquet");
+    write_sample_parquet(&path);
+
+    let engine = DuckDbEngine::open_parquet(path.to_str().unwrap()).unwrap();
+    // Malformed statement: LIMIT before WHERE (the exact shape hit in the app).
+    let err = engine
+        .execute_sql("SELECT * FROM working LIMIT 100 WHERE id = 1;")
+        .unwrap_err();
+    assert!(
+        err.contains("Parser Error") || err.contains("syntax"),
+        "unexpected error: {err}"
+    );
+
+    let after = engine.execute_sql("SELECT COUNT(*) AS n FROM working");
+    assert!(
+        after.is_ok(),
+        "engine wedged after parser error: {}",
+        after.unwrap_err()
+    );
+}
+
+#[test]
 fn empty_parquet_opens_and_reads_zero_rows() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("empty.parquet");
@@ -219,6 +243,40 @@ let columns = engine.column_info().unwrap();
 
     let rows = engine.get_all_rows().unwrap();
     assert!(rows.is_empty(), "0-row file must return an empty row list, not an error");
+}
+
+#[test]
+fn folder_open_unions_heterogeneous_schemas() {
+    let dir = tempdir().unwrap();
+    // Two files with different schemas in one folder used to make the glob read fail.
+    let conn = duckdb::Connection::open_in_memory().unwrap();
+    let a = dir.path().join("a.parquet");
+    let b = dir.path().join("b.parquet");
+    conn.execute_batch(&format!(
+        "CREATE TABLE ta (id INTEGER, name VARCHAR); \
+         INSERT INTO ta VALUES (1, 'x'), (2, 'y'); \
+         COPY ta TO '{}' (FORMAT PARQUET);",
+        a.to_string_lossy().replace('\'', "''")
+    ))
+    .unwrap();
+    conn.execute_batch(&format!(
+        "CREATE TABLE tb (id INTEGER, extra DOUBLE); \
+         INSERT INTO tb VALUES (10, 1.5), (11, 2.5), (12, 3.5); \
+         COPY tb TO '{}' (FORMAT PARQUET);",
+        b.to_string_lossy().replace('\'', "''")
+    ))
+    .unwrap();
+
+    let engine = DuckDbEngine::open_folder(dir.path().to_str().unwrap()).unwrap();
+    assert_eq!(engine.row_count(), 5, "mixed-schema folder should union all rows");
+    let mut names: Vec<String> = engine
+        .column_info()
+        .unwrap()
+        .into_iter()
+        .map(|c| c.name)
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["extra", "id", "name"]);
 }
 
 #[test]
@@ -768,4 +826,130 @@ fn execute_sql_skips_leading_comments_and_rejects_dml() {
 
     let err = engine.execute_sql("DELETE FROM __pq_working").unwrap_err();
     assert!(err.contains("Only SELECT"));
+}
+
+#[test]
+fn raw_duckdb_prepare_error_then_prepare() {
+    let conn = duckdb::Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE t(a INT); INSERT INTO t VALUES (1);")
+        .unwrap();
+    let bad = conn.prepare("SELECT * FROM t LIMIT 1 WHERE a = 1");
+    assert!(bad.is_err(), "malformed SQL must fail to prepare");
+    match conn.prepare("SELECT * FROM t") {
+        Ok(_) => eprintln!("raw duckdb: second prepare OK"),
+        Err(e) => panic!("raw duckdb wedged after failed prepare: {e}"),
+    }
+}
+
+#[test]
+fn raw_duckdb_clone_recovers_after_failed_prepare() {
+    let conn = duckdb::Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE t(a INT); INSERT INTO t VALUES (1);")
+        .unwrap();
+    assert!(conn
+        .prepare("SELECT * FROM t LIMIT 1 WHERE a = 1")
+        .is_err());
+    let clone = conn.try_clone().expect("try_clone failed");
+    match clone.prepare("SELECT * FROM t") {
+        Ok(_) => eprintln!("clone prepare OK"),
+        Err(e) => panic!("clone wedged too: {e}"),
+    }
+}
+
+#[test]
+fn raw_duckdb_binder_error_then_prepare() {
+    let conn = duckdb::Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE t(a INT); INSERT INTO t VALUES (1);")
+        .unwrap();
+    // Binder error (not a parser error): unknown column.
+    assert!(conn.prepare("SELECT nope FROM t").is_err());
+    match conn.prepare("SELECT * FROM t") {
+        Ok(_) => eprintln!("binder error did not poison the connection"),
+        Err(e) => panic!("binder error poisoned connection: {e}"),
+    }
+}
+
+#[test]
+fn export_query_writes_all_formats_and_rejects_dml() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("sample.parquet");
+    write_sample_parquet(&file);
+    let engine = DuckDbEngine::open_parquet(&file.to_string_lossy()).unwrap();
+
+    let csv = dir.path().join("out.csv");
+    engine
+        .export_query(
+            "SELECT id, name FROM working LIMIT 3",
+            &csv.to_string_lossy(),
+            "csv",
+            None,
+        )
+        .unwrap();
+    let text = std::fs::read_to_string(&csv).unwrap();
+    assert!(text.starts_with("id,name"), "csv header missing: {text}");
+    assert_eq!(text.lines().count(), 4, "expected header + 3 rows: {text}");
+
+    let xlsx = dir.path().join("out.xlsx");
+    engine
+        .export_query("SELECT * FROM working LIMIT 5", &xlsx.to_string_lossy(), "excel", None)
+        .unwrap();
+    assert!(xlsx.metadata().unwrap().len() > 0, "xlsx file is empty");
+
+    let pq = dir.path().join("out.parquet");
+    engine
+        .export_query(
+            "SELECT * FROM working LIMIT 10",
+            &pq.to_string_lossy(),
+            "parquet",
+            Some("zstd"),
+        )
+        .unwrap();
+    let meta = engine.get_table_meta(&pq.to_string_lossy()).unwrap();
+    assert_eq!(meta["rows"], 10);
+
+    // Comment-prefixed SELECT is accepted; DML is rejected.
+    assert!(engine
+        .export_query(
+            "-- note\nSELECT COUNT(*) FROM working",
+            &csv.to_string_lossy(),
+            "csv",
+            None
+        )
+        .is_ok());
+    assert!(engine
+        .export_query("DELETE FROM working", &csv.to_string_lossy(), "csv", None)
+        .is_err());
+}
+#[test]
+fn execute_sql_accepts_leading_parenthesis_and_still_rejects_dml() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("sample.parquet");
+    write_sample_parquet(&file);
+    let engine = DuckDbEngine::open_parquet(&file.to_string_lossy()).unwrap();
+
+    let res = engine
+        .execute_sql("(SELECT id FROM working LIMIT 1) UNION ALL (SELECT id FROM working LIMIT 1)")
+        .expect("parenthesized SELECT should be allowed");
+    assert_eq!(res.rows.len(), 2);
+
+    assert!(engine.execute_sql("(DELETE FROM working)").is_err());
+}
+#[test]
+fn dirty_flag_returns_to_clean_at_save_point() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sample.parquet");
+    write_sample_parquet(&path);
+    let mut engine = DuckDbEngine::open_parquet(&path.to_string_lossy()).unwrap();
+    assert!(!engine.is_dirty());
+    engine.insert_row().unwrap();
+    assert!(engine.is_dirty(), "insert should mark dirty");
+    engine.mark_clean();
+    assert!(!engine.is_dirty(), "save point should be clean");
+    engine.undo().unwrap();
+    assert!(engine.is_dirty(), "undo past the save point should be dirty");
+    engine.redo().unwrap();
+    assert!(!engine.is_dirty(), "redo back to the save point should be clean");
+    let columns = engine.column_info().unwrap();
+    engine.edit_cell(1, 0, &serde_json::json!(7), &columns).unwrap();
+    assert!(engine.is_dirty(), "a fresh edit should be dirty again");
 }

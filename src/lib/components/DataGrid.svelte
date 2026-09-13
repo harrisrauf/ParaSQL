@@ -183,8 +183,8 @@
     editingCell = { rowId: row.row_id, colIdx };
   }
 
-  async function handleSave(rowId: number, colIdx: number, value: string | number | boolean | null) {
-    if (!tryBeginMutation()) return;
+  async function handleSave(rowId: number, colIdx: number, value: string | number | boolean | null): Promise<boolean> {
+    if (!tryBeginMutation()) return false;
     try {
       const result = await editCell(rowId, colIdx, value);
       if (result.rows.length > 0) {
@@ -193,10 +193,12 @@
         tableStore.update(s => ({ ...s, modified: true }));
       }
       editingCell = null;
+      return true;
     } catch (err) {
       console.error('Failed to edit cell:', err);
       notify(`Edit failed: ${err instanceof Error ? err.message : String(err)}`, 'error');
       // Keep the editor open so the value can be corrected or cancelled.
+      return false;
     } finally {
       endMutation();
     }
@@ -252,10 +254,16 @@
           e.preventDefault();
         }
         return;
-      case 'Tab':
-        nc = Math.min(columns.length - 1, colIdx + 1);
+      case 'Tab': {
+        const next = e.shiftKey ? Math.max(0, colIdx - 1) : Math.min(columns.length - 1, colIdx + 1);
+        if (next === colIdx) {
+          // At the first/last cell: let Tab move focus out of the grid
+          return;
+        }
+        nc = next;
         e.preventDefault();
         break;
+      }
       case 'Escape':
         tableStore.clearSelection();
         break;
@@ -453,8 +461,8 @@
     font-size: 11px;
     line-height: 1.4;
     color: var(--text-secondary);
-    background: var(--bg-elevated);
-    border: 1px solid var(--border);
+    background: var(--bg, #fff);
+    border: 1px solid var(--border-color, #e0e0e0);
     border-radius: 10px;
     pointer-events: none;
   }

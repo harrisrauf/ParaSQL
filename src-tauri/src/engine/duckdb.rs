@@ -20,6 +20,9 @@ pub struct DuckDbEngine {
     created_views: Vec<String>,
     /// True when the working table has unsaved mutations. Cleared on save.
     dirty: bool,
+    /// Undo-stack depth at the last successful save; undo/redo recompute
+    /// [`Self::is_dirty`] against it so returning to the save point is clean.
+    saved_depth: usize,
     /// Monotonic counter for unique undo-snapshot temp table names.
     undo_seq: usize,
 }
@@ -44,7 +47,56 @@ const UNDO_TABLE_PREFIX: &str = "__pq_undo_";
 
 /// True for names the engine reserves for its own working objects.
 fn is_reserved_name(name: &str) -> bool {
-    name == WORKING_TABLE || name == RAW_VIEW || name.starts_with("__pq_")
+    let lower = name.to_ascii_lowercase();
+    lower == WORKING_TABLE || lower == RAW_VIEW || lower.starts_with("__pq_")
+}
+
+/// Accept only read-only queries and return the statement with leading
+/// comments and trailing semicolons stripped.
+fn select_only_sql(sql: &str) -> Result<String, String> {
+    let mut stmt = sql.trim();
+    // Ignore leading comments so "-- note\nSELECT ..." still works.
+    loop {
+        if let Some(rest) = stmt.strip_prefix("--") {
+            stmt = rest
+                .split_once('\n')
+                .map(|(_, r)| r)
+                .unwrap_or("")
+                .trim_start();
+        } else if let Some(rest) = stmt.strip_prefix("/*") {
+            stmt = rest
+                .split_once("*/")
+                .map(|(_, r)| r)
+                .unwrap_or("")
+                .trim_start();
+        } else {
+            break;
+        }
+    }
+    // A leading parenthesis is common in set operations, e.g.
+    // `(SELECT ...) UNION ALL (SELECT ...)`; validate the keyword after it.
+    let probe = stmt.trim_start_matches('(').trim_start();
+    let head: String = probe.chars().take(24).collect::<String>().to_ascii_uppercase();
+    if !(head.starts_with("SELECT") || head.starts_with("WITH")) {
+        return Err(
+            "Only SELECT queries are allowed here. Open a table for editing to modify data."
+                .to_string(),
+        );
+    }
+    Ok(stmt.trim_end_matches(';').trim_end().to_string())
+}
+
+/// Map a user-facing compression name to a parquet codec keyword.
+fn parquet_codec(compression: &str) -> Result<&'static str, String> {
+    match compression.to_uppercase().as_str() {
+        "SNAPPY" => Ok("SNAPPY"),
+        "ZSTD" => Ok("ZSTD"),
+        "GZIP" => Ok("GZIP"),
+        "LZ4" | "LZ4_RAW" => Ok("LZ4_RAW"),
+        "BROTLI" => Ok("BROTLI"),
+        "NONE" | "UNCOMPRESSED" => Ok("UNCOMPRESSED"),
+        other => Err(format!("Unsupported compression: {}", other)),
+    }
 }
 
 /// A recorded mutation: `redo_sql` re-applies it, `undo_sql` reverses it.
@@ -100,6 +152,7 @@ impl DuckDbEngine {
             redo_stack: Vec::new(),
             created_views: Vec::new(),
             dirty: false,
+            saved_depth: 0,
             undo_seq: 0,
         })
     }
@@ -109,10 +162,12 @@ impl DuckDbEngine {
         let conn = Connection::open_in_memory()
             .map_err(|e| format!("Failed to create DuckDB connection: {}", e))?;
 
-        // Use DuckDB's glob to read all parquet files in the folder
+        // Use DuckDB's glob to read all parquet files in the folder.
+        // union_by_name keeps folders with heterogeneous schemas readable
+        // (missing columns come back as NULL) instead of failing the glob read.
         let glob_pattern = format!("{}/**/*.parquet", folder_path.replace('\'', "''"));
         conn.execute_batch(&format!(
-            "CREATE OR REPLACE VIEW {} AS SELECT * FROM read_parquet('{}')",
+            "CREATE OR REPLACE VIEW {} AS SELECT * FROM read_parquet('{}', union_by_name = true)",
             RAW_VIEW, glob_pattern
         ))
         .map_err(|e| format!("Failed to load parquet files from folder: {}", e))?;
@@ -147,17 +202,42 @@ impl DuckDbEngine {
             redo_stack: Vec::new(),
             created_views: Vec::new(),
             dirty: false,
+            saved_depth: 0,
             undo_seq: 0,
         })
     }
 
-    /// Wrap ALTER statements so the _row_id index doesn't block them.
-    /// DuckDB refuses ALTER TABLE while catalog entries depend on the table.
-    fn alter_without_index(&self, stmts: &str) -> String {
+    /// Build a batch that runs ALTER statements with the _row_id index
+    /// temporarily dropped (DuckDB refuses some ALTER TABLE forms while
+    /// catalog entries depend on the table).
+    fn alter_script(&self, stmts: &str) -> String {
         format!(
             "DROP INDEX IF EXISTS {}; {}; CREATE INDEX IF NOT EXISTS {} ON {}({})",
             ROW_ID_INDEX, stmts, ROW_ID_INDEX, self.table_name, ROW_ID_COL
         )
+    }
+
+    /// Execute a (possibly multi-statement) script inside a transaction so a
+    /// failure cannot leave the schema half-changed (e.g. index dropped but the
+    /// ALTER failed). Recreates the row-id index as a safety net on failure.
+    fn execute_script(&self, script: &str) -> Result<(), String> {
+        self.conn
+            .execute_batch("BEGIN TRANSACTION")
+            .map_err(|e| format!("Failed to begin transaction: {}", e))?;
+        match self.conn.execute_batch(script) {
+            Ok(()) => self
+                .conn
+                .execute_batch("COMMIT")
+                .map_err(|e| format!("Failed to commit transaction: {}", e)),
+            Err(e) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                let _ = self.conn.execute_batch(&format!(
+                    "CREATE INDEX IF NOT EXISTS {} ON {}({})",
+                    ROW_ID_INDEX, self.table_name, ROW_ID_COL
+                ));
+                Err(e.to_string())
+            }
+        }
     }
 
     /// Snapshot the rows matching `where_sql` into a temp table so undo can
@@ -355,38 +435,12 @@ impl DuckDbEngine {
     pub fn execute_sql(&self, sql: &str) -> Result<QueryResult, String> {
         // Free-form queries are read-only: mutations here would bypass the
         // undo history entirely, so only SELECT/WITH statements are allowed.
-        let trimmed = sql.trim();
-        // Ignore leading comments so "-- note\nSELECT ..." still works.
-        let mut stmt = trimmed;
-        loop {
-            if let Some(rest) = stmt.strip_prefix("--") {
-                stmt = rest
-                    .split_once('\n')
-                    .map(|(_, r)| r)
-                    .unwrap_or("")
-                    .trim_start();
-            } else if let Some(rest) = stmt.strip_prefix("/*") {
-                stmt = rest
-                    .split_once("*/")
-                    .map(|(_, r)| r)
-                    .unwrap_or("")
-                    .trim_start();
-            } else {
-                break;
-            }
-        }
-        let head = stmt[..stmt.len().min(24)].to_ascii_uppercase();
-        if !(head.starts_with("SELECT") || head.starts_with("WITH")) {
-            return Err(
-                "Only SELECT queries are allowed here. Open a table for editing to modify data."
-                    .to_string(),
-            );
-        }
+        let stmt = select_only_sql(sql)?;
 
         // Cap materialization at one past the limit so we can detect overflow.
         let capped = format!(
             "SELECT * FROM ({}) AS __pq_query LIMIT {}",
-            stmt.trim_end_matches(';').trim_end(),
+            stmt,
             SQL_RESULT_LIMIT + 1
         );
         let batch = self.query_to_batch(&capped)?;
@@ -521,13 +575,17 @@ impl DuckDbEngine {
 
         let col_idents: Vec<String> = columns.iter().map(|c| quote_ident(&c.name)).collect();
 
-        // Pattern-aware defaults: peek at the last few rows of each column and
-        // continue the observed sequence when a pattern is confirmed; otherwise
-        // NULL (or the plain type default for NOT NULL columns). O(1) per
-        // column — no full-column scans.
+        // Pattern-aware defaults: one tail fetch for the whole row; continue the
+        // observed sequence when a pattern is confirmed, otherwise NULL (or the
+        // plain type default for NOT NULL columns).
+        let tail = self.last_rows(8)?;
         let mut defaults = Vec::with_capacity(columns.len());
-        for c in &columns {
-            defaults.push(self.next_default(&c.name, &c.dtype, c.nullable)?);
+        for (i, c) in columns.iter().enumerate() {
+            let series: Vec<JsonValue> = tail
+                .iter()
+                .map(|r| r.values.get(i).cloned().unwrap_or(JsonValue::Null))
+                .collect();
+            defaults.push(Self::next_default(&series, &c.dtype, c.nullable));
         }
 
         // Materialize the row_id now so undo/redo are exact and deterministic
@@ -571,28 +629,21 @@ impl DuckDbEngine {
         })
     }
 
-    /// Last `n` values of a column, newest first (used for pattern detection)
-    fn last_values(&self, col: &str, n: usize) -> Result<Vec<JsonValue>, String> {
+    /// Last `n` rows, newest first — a single tail fetch used for pattern detection.
+    fn last_rows(&self, n: usize) -> Result<Vec<RowData>, String> {
         let sql = format!(
-            "SELECT {} FROM {} ORDER BY {} DESC LIMIT {}",
-            quote_ident(col),
-            self.table_name,
-            ROW_ID_COL,
-            n
+            "SELECT * FROM {} ORDER BY {} DESC LIMIT {}",
+            self.table_name, ROW_ID_COL, n
         );
         let batch = self.query_to_batch(&sql)?;
-        let rows = rows_from_batch(&batch, 0)?;
-        Ok(rows
-            .into_iter()
-            .map(|r| r.values.into_iter().next().unwrap_or(JsonValue::Null))
-            .collect())
+        rows_from_batch(&batch, 0)
     }
 
-    /// Compute a pattern-aware SQL default literal for one column. Only fills
-    /// when a pattern is confirmed by the window; otherwise NULL (or the plain
-    /// type default when the column is NOT NULL).
-    fn next_default(&self, name: &str, dtype: &str, nullable: bool) -> Result<String, String> {
-        let last8 = self.last_values(name, 8)?;
+    /// Compute a pattern-aware SQL default literal from the tail values. Only
+    /// fills when a pattern is confirmed by the window; otherwise NULL (or the
+    /// plain type default when the column is NOT NULL).
+    fn next_default(values: &[JsonValue], dtype: &str, nullable: bool) -> String {
+        let last8 = values;
         let t = dtype.to_lowercase();
         let lit = if is_int_dtype(&t) {
             next_int_default(&last8)
@@ -636,7 +687,7 @@ impl DuckDbEngine {
                 }
             }
         };
-        Ok(lit)
+        lit
     }
 
     /// Add a new column
@@ -664,7 +715,7 @@ impl DuckDbEngine {
             duckdb_type,
             default_val
         );
-        let inverse = self.alter_without_index(&format!(
+        let inverse = self.alter_script(&format!(
             "ALTER TABLE {} DROP COLUMN {}",
             self.table_name,
             quote_ident(name)
@@ -677,73 +728,48 @@ impl DuckDbEngine {
         Ok(())
     }
 
-    /// Drop a column. Values are captured at drop time and embedded in the
-    /// inverse statement as a literal VALUES list, so undo restores them
-    /// without any auxiliary table (DuckDB blocks ALTER TABLE while catalog
-    /// entries depend on it; the _row_id index is temporarily dropped around
-    /// the ALTER to avoid that).
+    /// Drop a column. The column's values are snapshotted into a temp table so
+    /// undo restores BLOB/LIST/STRUCT values exactly (JSON round-tripping is lossy).
     pub fn drop_column(&mut self, name: &str) -> Result<(), String> {
         let columns = self.column_info()?;
         if columns.len() <= 1 {
             return Err("Cannot drop the last column".to_string());
         }
-        if !columns.iter().any(|c| c.name == name) {
-            return Err(format!("Column '{}' does not exist", name));
-        }
-
+        let dtype = match columns.iter().find(|c| c.name == name) {
+            Some(c) => c.dtype.clone(),
+            None => return Err(format!("Column '{}' does not exist", name)),
+        };
         let col_ident = quote_ident(name);
-        let dtype = columns
-            .iter()
-            .find(|c| c.name == name)
-            .map(|c| c.dtype.clone())
-            .unwrap_or_else(|| "VARCHAR".to_string());
 
-        // Capture the column values so undo can restore them exactly
-        let capture_sql = format!(
-            "SELECT {}, {} FROM {}",
-            ROW_ID_COL, col_ident, self.table_name
-        );
-        let batch = self.query_to_batch(&capture_sql)?;
-        let captured = rows_from_batch(&batch, 0)?;
+        // Snapshot row id + column values for a type-faithful undo.
+        self.undo_seq += 1;
+        let snapshot = format!("{}{}", UNDO_TABLE_PREFIX, self.undo_seq);
+        let snap_ident = quote_ident(&snapshot);
+        self.conn
+            .execute_batch(&format!(
+                "CREATE TEMP TABLE {} AS SELECT {}, {} FROM {}",
+                snap_ident, ROW_ID_COL, col_ident, self.table_name
+            ))
+            .map_err(|e| format!("Failed to snapshot column for undo: {}", e))?;
+        let cleanup = format!("DROP TABLE IF EXISTS {}", snap_ident);
 
-        let mut values_sql: Vec<String> = Vec::new();
-        for r in &captured {
-            let lit = r
-                .values
-                .first()
-                .map(json_to_literal)
-                .unwrap_or_else(|| Ok("NULL".to_string()))?;
-            values_sql.push(format!("({}, {})", r.row_id, lit));
-        }
-
-        let sql = format!(
-            "DROP INDEX IF EXISTS {}; \
-             ALTER TABLE {} DROP COLUMN {}; \
-             CREATE INDEX IF NOT EXISTS {} ON {}({})",
-            ROW_ID_INDEX, self.table_name, col_ident, ROW_ID_INDEX, self.table_name, ROW_ID_COL
-        );
-
-        let mut inverse = format!(
-            "DROP INDEX IF EXISTS {}; \
-             ALTER TABLE {} ADD COLUMN {} {};",
-            ROW_ID_INDEX, self.table_name, col_ident, dtype
-        );
-        if !values_sql.is_empty() {
-            inverse.push_str(&format!(
-                " UPDATE {} SET {} = v.{} FROM (VALUES {}) AS v({}, {}) WHERE {}.{} = v.{};",
-                self.table_name, col_ident, col_ident, values_sql.join(", "),
-                ROW_ID_COL, col_ident, self.table_name, ROW_ID_COL, ROW_ID_COL
-            ));
-        }
-        inverse.push_str(&format!(
-            " CREATE INDEX IF NOT EXISTS {} ON {}({});",
-            ROW_ID_INDEX, self.table_name, ROW_ID_COL
+        let forward = self.alter_script(&format!(
+            "ALTER TABLE {} DROP COLUMN {}",
+            self.table_name, col_ident
+        ));
+        let inverse = self.alter_script(&format!(
+            "ALTER TABLE {} ADD COLUMN {} {}; \
+             UPDATE {} SET {} = s.{} FROM {} s WHERE {}.{} = s.{}",
+            self.table_name, col_ident, dtype,
+            self.table_name, col_ident, col_ident, snap_ident,
+            self.table_name, ROW_ID_COL, ROW_ID_COL
         ));
 
-        self.conn
-            .execute_batch(&sql)
-            .map_err(|e| format!("Failed to drop column: {}", e))?;
-        self.push_undo(sql, inverse, None);
+        if let Err(e) = self.execute_script(&forward) {
+            let _ = self.conn.execute_batch(&cleanup);
+            return Err(format!("Failed to drop column: {}", e));
+        }
+        self.push_undo(forward, inverse, Some(cleanup));
         Ok(())
     }
 
@@ -758,21 +784,20 @@ impl DuckDbEngine {
         if new_name != old_name && self.column_info()?.iter().any(|c| c.name == new_name) {
             return Err(format!("A column named '{}' already exists", new_name));
         }
-        let forward = self.alter_without_index(&format!(
+        let forward = self.alter_script(&format!(
             "ALTER TABLE {} RENAME COLUMN {} TO {}",
             self.table_name,
             quote_ident(old_name),
             quote_ident(new_name)
         ));
-        let inverse = self.alter_without_index(&format!(
+        let inverse = self.alter_script(&format!(
             "ALTER TABLE {} RENAME COLUMN {} TO {}",
             self.table_name,
             quote_ident(new_name),
             quote_ident(old_name)
         ));
 
-        self.conn
-            .execute_batch(&forward)
+        self.execute_script(&forward)
             .map_err(|e| format!("Failed to rename column: {}", e))?;
         self.push_undo(forward, inverse, None);
         Ok(())
@@ -831,37 +856,48 @@ impl DuckDbEngine {
         })
     }
 
-    /// Export to JSON
+    /// Export to JSON (atomic: temp file + rename)
     pub fn export_json(&self, path: &str) -> Result<(), String> {
-        let escaped = path.replace('\'', "''");
-        let sql = format!(
-            "COPY ({}) TO '{}' (FORMAT JSON, ARRAY true)",
-            self.export_select()?,
-            escaped
-        );
-        self.conn
-            .execute_batch(&sql)
-            .map_err(|e| format!("Failed to export JSON: {}", e))?;
-        Ok(())
+        let select = self.export_select()?;
+        atomic_replace(path, |tmp| {
+            let escaped = tmp.replace('\'', "''");
+            let sql = format!("COPY ({}) TO '{}' (FORMAT JSON, ARRAY true)", select, escaped);
+            self.conn
+                .execute_batch(&sql)
+                .map_err(|e| format!("Failed to export JSON: {}", e))
+        })
     }
 
-    /// Export to CSV
+    /// Export to CSV (atomic: temp file + rename)
     pub fn export_csv(&self, path: &str) -> Result<(), String> {
-        let escaped = path.replace('\'', "''");
-        let sql = format!(
-            "COPY ({}) TO '{}' (FORMAT CSV, HEADER true)",
-            self.export_select()?,
-            escaped
-        );
-        self.conn
-            .execute_batch(&sql)
-            .map_err(|e| format!("Failed to export CSV: {}", e))?;
-        Ok(())
+        let select = self.export_select()?;
+        atomic_replace(path, |tmp| {
+            let escaped = tmp.replace('\'', "''");
+            let sql = format!(
+                "COPY ({}) TO '{}' (FORMAT CSV, HEADER true)",
+                select, escaped
+            );
+            self.conn
+                .execute_batch(&sql)
+                .map_err(|e| format!("Failed to export CSV: {}", e))
+        })
     }
 
-    /// Export to Excel (xlsx), writing cells directly from the Arrow data
+    /// Export to Excel (xlsx), writing cells directly from the Arrow data.
+    /// The query is capped at the Excel row limit before materializing so a
+    /// huge result cannot OOM the process; the precise error comes from the guard.
     pub fn export_excel(&self, path: &str) -> Result<(), String> {
-        let batch = self.query_to_batch(&self.export_select()?)?;
+        let sql = format!(
+            "SELECT * FROM ({}) AS __pq_xlsx LIMIT {}",
+            self.export_select()?,
+            1_048_576
+        );
+        let batch = self.query_to_batch(&sql)?;
+        atomic_replace(path, |tmp| self.write_excel_batch(&batch, tmp))
+    }
+
+    /// Shared xlsx writer for table exports and ad-hoc query exports.
+    fn write_excel_batch(&self, batch: &RecordBatch, path: &str) -> Result<(), String> {
         let schema = batch.schema();
         let num_cols = batch.num_columns();
 
@@ -924,6 +960,50 @@ impl DuckDbEngine {
         Ok(())
     }
 
+    /// Export the result of a read-only query to csv/xlsx/parquet.
+    pub fn export_query(
+        &self,
+        sql: &str,
+        path: &str,
+        format: &str,
+        compression: Option<&str>,
+    ) -> Result<(), String> {
+        let stmt = select_only_sql(sql)?;
+        match format.to_ascii_lowercase().as_str() {
+            "parquet" => {
+                let comp = parquet_codec(compression.unwrap_or("SNAPPY"))?;
+                atomic_replace(path, |tmp| {
+                    let escaped = tmp.replace('\'', "''");
+                    let sql = format!(
+                        "COPY ({}) TO '{}' (FORMAT PARQUET, COMPRESSION {})",
+                        stmt, escaped, comp
+                    );
+                    self.conn
+                        .execute_batch(&sql)
+                        .map_err(|e| format!("Failed to export query: {}", e))
+                })
+            }
+            "csv" => {
+                let escaped = path.replace('\'', "''");
+                let sql = format!("COPY ({}) TO '{}' (FORMAT CSV, HEADER true)", stmt, escaped);
+                self.conn
+                    .execute_batch(&sql)
+                    .map_err(|e| format!("Failed to export query: {}", e))
+            }
+            "excel" | "xlsx" => {
+                // Cap at the Excel limit before materializing; the writer's own
+                // guard then reports the exact overflow error.
+                let limited = format!(
+                    "SELECT * FROM ({}) AS __pq_xlsx LIMIT {}",
+                    stmt, 1_048_576
+                );
+                let batch = self.query_to_batch(&limited)?;
+                self.write_excel_batch(&batch, path)
+            }
+            other => Err(format!("Unsupported export format: {}", other)),
+        }
+    }
+
     /// Undo the last mutation by executing its inverse statement.
     /// The history is only mutated after the inverse succeeds, so a failure
     /// leaves the operation retryable instead of silently discarding it.
@@ -932,11 +1012,12 @@ impl DuckDbEngine {
             return Err("Nothing to undo".to_string());
         }
         let idx = self.undo_stack.len() - 1;
-        self.conn
-            .execute_batch(&self.undo_stack[idx].undo_sql)
+        self.execute_script(&self.undo_stack[idx].undo_sql)
             .map_err(|e| format!("Failed to undo: {}", e))?;
         let entry = self.undo_stack.pop().unwrap();
         self.redo_stack.push(entry);
+        // Returning to the save point is clean again; anything else is not.
+        self.dirty = self.undo_stack.len() != self.saved_depth;
         Ok(())
     }
 
@@ -946,11 +1027,11 @@ impl DuckDbEngine {
             return Err("Nothing to redo".to_string());
         }
         let idx = self.redo_stack.len() - 1;
-        self.conn
-            .execute_batch(&self.redo_stack[idx].redo_sql)
+        self.execute_script(&self.redo_stack[idx].redo_sql)
             .map_err(|e| format!("Failed to redo: {}", e))?;
         let entry = self.redo_stack.pop().unwrap();
         self.undo_stack.push(entry);
+        self.dirty = self.undo_stack.len() != self.saved_depth;
         Ok(())
     }
 
@@ -984,6 +1065,7 @@ impl DuckDbEngine {
     /// Mark the current editor state as saved (after a successful write).
     pub fn mark_clean(&mut self) {
         self.dirty = false;
+        self.saved_depth = self.undo_stack.len();
     }
 
     // --- Workspace mode (multi-file: each file is a table) ---
@@ -1001,6 +1083,7 @@ impl DuckDbEngine {
             redo_stack: Vec::new(),
             created_views: Vec::new(),
             dirty: false,
+            saved_depth: 0,
             undo_seq: 0,
         };
         engine.sync_workspace_tables(ws)?;
@@ -1082,27 +1165,20 @@ impl DuckDbEngine {
             ))
             .map_err(|e| format!("Failed to open table for editing: {}", e))?;
 
-        // Swap the fully-built scratch table into place only now.
-        self.conn
-            .execute_batch(&format!("DROP INDEX IF EXISTS {}", ROW_ID_INDEX))
-            .ok();
-        self.conn
-            .execute_batch(&format!("DROP TABLE IF EXISTS {}", WORKING_TABLE))
-            .map_err(|e| format!("Failed to reset editor: {}", e))?;
-        self.conn
-            .execute_batch(&format!("ALTER TABLE {} RENAME TO {}", SCRATCH, WORKING_TABLE))
-            .map_err(|e| format!("Failed to open table for editing: {}", e))?;
-        self.conn
-            .execute_batch(&format!(
-                "CREATE INDEX {} ON {}({})",
-                ROW_ID_INDEX, WORKING_TABLE, ROW_ID_COL
-            ))
-            .map_err(|e| format!("Failed to index row id: {}", e))?;
+        // Swap the fully-built scratch table into place atomically.
+        self.execute_script(&format!(
+            "DROP INDEX IF EXISTS {}; DROP TABLE IF EXISTS {}; \
+             ALTER TABLE {} RENAME TO {}; CREATE INDEX {} ON {}({})",
+            ROW_ID_INDEX, WORKING_TABLE, SCRATCH, WORKING_TABLE,
+            ROW_ID_INDEX, WORKING_TABLE, ROW_ID_COL
+        ))
+        .map_err(|e| format!("Failed to open table for editing: {}", e))?;
 
         self.table_name = WORKING_TABLE.to_string();
         self.file_path = Some(std::path::PathBuf::from(abs_path));
         self.clear_history();
         self.dirty = false;
+        self.saved_depth = 0;
         Ok(())
     }
 
@@ -1118,6 +1194,7 @@ impl DuckDbEngine {
         self.file_path = None;
         self.clear_history();
         self.dirty = false;
+        self.saved_depth = 0;
         Ok(())
     }
 
@@ -1139,7 +1216,7 @@ impl DuckDbEngine {
             .query_row(&agg_sql, [], |r| Ok((r.get(0)?, r.get(1)?)))
             .map_err(|e| format!("Failed to read parquet metadata: {}", e))?;
         let comp_sql = format!(
-            "SELECT DISTINCT compression FROM parquet_metadata('{}') LIMIT 1",
+            "SELECT DISTINCT compression FROM parquet_metadata('{}') ORDER BY compression LIMIT 1",
             escaped
         );
         let compression: String = self
@@ -1160,15 +1237,7 @@ impl DuckDbEngine {
 
     /// Export a workspace table to parquet with the requested compression.
     pub fn export_table(&self, name: &str, out_path: &str, compression: &str) -> Result<(), String> {
-        let comp = match compression.to_uppercase().as_str() {
-            "SNAPPY" => "SNAPPY",
-            "ZSTD" => "ZSTD",
-            "GZIP" => "GZIP",
-            "LZ4" | "LZ4_RAW" => "LZ4_RAW",
-            "BROTLI" => "BROTLI",
-            "NONE" | "UNCOMPRESSED" => "UNCOMPRESSED",
-            other => return Err(format!("Unsupported compression: {}", other)),
-        };
+        let comp = parquet_codec(compression)?;
         atomic_replace(out_path, |tmp| {
             let escaped = tmp.replace('\'', "''");
             let sql = format!(
@@ -1458,10 +1527,12 @@ fn next_timestamp_default(values: &[JsonValue]) -> Option<String> {
         candidate = candidate + step;
         guard += 1;
     }
-    Some(format!(
-        "'{}'::TIMESTAMP",
-        candidate.format("%Y-%m-%d %H:%M:%S")
-    ))
+    let fmt = if candidate.and_utc().timestamp_subsec_nanos() == 0 {
+        "%Y-%m-%d %H:%M:%S"
+    } else {
+        "%Y-%m-%d %H:%M:%S%.f"
+    };
+    Some(format!("'{}'::TIMESTAMP", candidate.format(fmt)))
 }
 
 /// Split "ID-0003" into ("ID-", 3, 4). Returns None when there's no trailing number.

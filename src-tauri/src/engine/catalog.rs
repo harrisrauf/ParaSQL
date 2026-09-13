@@ -14,7 +14,8 @@ pub struct WorkspaceTable {
     pub compression: Option<String>,
     pub size: Option<u64>,
     pub mtime: Option<u64>,
-    /// Resolved absolute path (filled by the backend; kept for round-trips)
+    /// Resolved absolute path (filled by the backend; recomputed on load)
+    #[serde(skip_serializing)]
     pub abs_path: Option<String>,
     pub missing: bool,
 }
@@ -37,6 +38,7 @@ pub struct Workspace {
     /// Tables larger than this (MB) require explicit confirmation to open for editing
     pub edit_size_limit_mb: Option<u64>,
     /// Directory of the workspace file (not persisted — derived on load)
+    #[serde(skip)]
     pub dir: Option<String>,
 }
 

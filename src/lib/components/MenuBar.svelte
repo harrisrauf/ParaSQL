@@ -225,8 +225,11 @@
     const inside = (r: DOMRect) =>
       e.clientX >= r.left && e.clientX <= r.right &&
       e.clientY >= r.top && e.clientY <= r.bottom;
-    const drop = document.querySelector('.menu-dropdown')?.getBoundingClientRect();
-    if (inside(bar) || (drop && inside(drop))) return;
+    if (inside(bar)) return;
+    const panels = document.querySelectorAll('.menu-dropdown, .submenu');
+    for (const panel of panels) {
+      if (inside(panel.getBoundingClientRect())) return;
+    }
     openMenu = null;
   }
 </script>
@@ -263,7 +266,7 @@
                 <div class="submenu">
                   {#each item.submenu as sub (sub.label)}
                     <button class="menu-item" onclick={(e) => { e.stopPropagation(); sub.action(); openMenu = null; }}>
-                      <span class="check">{sub.checked ? '✓' : ''}</span>
+                      {#if sub.checked}<span class="check">✓</span>{/if}
                       <span>{sub.label}</span>
                     </button>
                   {/each}
@@ -280,7 +283,7 @@
                   openMenu = null;
                 }}
               >
-                <span class="check">{item.checked ? '✓' : ''}</span>
+                {#if item.checked}<span class="check">✓</span>{/if}
                 <span>{item.label}</span>
               </button>
             {/if}
@@ -353,6 +356,7 @@
     cursor: pointer;
     text-align: left;
     white-space: nowrap;
+    position: relative;
   }
 
   .menu-item:hover {
@@ -395,6 +399,17 @@
     display: block;
   }
 
+  /* Invisible bridge so the pointer can travel from the parent item into the
+     submenu without leaving the hover target. */
+  .submenu::before {
+    content: '';
+    position: absolute;
+    left: -10px;
+    top: 0;
+    bottom: 0;
+    width: 10px;
+  }
+
   .menu-sep {
     height: 1px;
     margin: 4px 8px;
@@ -402,8 +417,12 @@
   }
 
   .check {
-    width: 14px;
-    flex-shrink: 0;
+    position: absolute;
+    left: 4px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 12px;
     font-size: 11px;
+    color: var(--text-primary, #333);
   }
 </style>

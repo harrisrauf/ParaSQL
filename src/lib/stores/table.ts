@@ -1,4 +1,4 @@
-import { writable, derived } from 'svelte/store';
+import { writable, derived, get } from 'svelte/store';
 import type { ColumnInfo, RowData, SortConfig, SearchConfig, SortDirection, QueryResult } from '../types';
 import { getPage } from '../commands';
 
@@ -25,6 +25,8 @@ interface TableState {
   pageSize: number;
   currentPage: number;
   sqlResult: QueryResult | null;
+  /** SQL that produced the current result, when known (for export). */
+  lastSql: string | null;
   savedTable: { columns: ColumnInfo[]; rows: RowData[]; totalRows: number } | null;
   activeTab: 'data' | 'schema' | 'query' | 'metadata';
   loadingMore: boolean;
@@ -54,6 +56,7 @@ function createTableStore() {
     pageSize: 500,
     currentPage: 0,
     sqlResult: null,
+    lastSql: null,
     savedTable: null,
     activeTab: 'data',
     loadingMore: false,
@@ -89,7 +92,7 @@ function createTableStore() {
     update(state => ({ ...state, sqlResult: result }));
   }
 
-  function applyQueryResult(result: QueryResult) {
+  function applyQueryResult(result: QueryResult, sql: string | null = null) {
     update(state => {
       const saved = state.sqlResult === null
         ? { columns: state.columns, rows: state.rows, totalRows: state.totalRows }
@@ -101,6 +104,7 @@ function createTableStore() {
         rows: result.rows,
         totalRows: result.rows.length,
         sqlResult: result,
+        lastSql: sql,
         filters: {},
         selection: emptySelection(),
         editable: false,
@@ -113,7 +117,7 @@ function createTableStore() {
 
   function restoreTable() {
     update(state => {
-      if (!state.savedTable) return { ...state, sqlResult: null, filters: {}, selection: emptySelection() };
+      if (!state.savedTable) return { ...state, sqlResult: null, lastSql: null, filters: {}, selection: emptySelection() };
       return {
         ...state,
         columns: state.savedTable.columns,
@@ -121,6 +125,7 @@ function createTableStore() {
         totalRows: state.savedTable.totalRows,
         savedTable: null,
         sqlResult: null,
+        lastSql: null,
         filters: {},
         selection: emptySelection(),
         editable: true,
@@ -157,7 +162,8 @@ function createTableStore() {
       currentPage: 0,
       sqlResult: null,
       savedTable: null,
-      activeTab: 'data',
+      lastSql: null,
+      activeTab: 'schema',
       loadingMore: false,
       searchRows: null,
       searchTruncated: false,
@@ -370,14 +376,12 @@ export const tableStore = createTableStore();
 export const initialLoadThreshold = INITIAL_LOAD_THRESHOLD;
 
 /** Row ids that have at least one selected cell (or all rows when select-all is active) */
+let selectedRowIdsMemo: { sel: SelectionState; base: RowData[] | null; out: Set<number> } | null = null;
 export const selectedRowIds = derived(tableStore, ($t) => {
-  let memo: { sel: SelectionState; base: RowData[] | null; out: Set<number> } = {
-    sel: emptySelection(),
-    base: null,
-    out: new Set(),
-  };
-  const base = $t.selection.allRows ? visibleRows($t) : null;
-  if (memo.sel === $t.selection && memo.base === base) return memo.out;
+  const base = $t.selection.allRows ? get(displayedRows) : null;
+  if (selectedRowIdsMemo && selectedRowIdsMemo.sel === $t.selection && selectedRowIdsMemo.base === base) {
+    return selectedRowIdsMemo.out;
+  }
   const s = new Set<number>();
   if ($t.selection.allRows) {
     for (const r of base!) s.add(r.row_id);
@@ -387,7 +391,7 @@ export const selectedRowIds = derived(tableStore, ($t) => {
       s.add(Number(key.slice(0, idx)));
     }
   }
-  memo = { sel: $t.selection, base, out: s };
+  selectedRowIdsMemo = { sel: $t.selection, base, out: s };
   return s;
 });
 
@@ -412,21 +416,31 @@ export function distinctValues(rows: RowData[], colIdx: number): (string | null)
   return values;
 }
 
+let displayedRowsMemo: {
+  columns: ColumnInfo[] | null;
+  rows: RowData[] | null;
+  searchRows: RowData[] | null;
+  filters: Record<string, Set<string | null>> | null;
+  search: SearchConfig | null;
+  sort: SortConfig | null;
+  out: RowData[];
+} | null = null;
+
 export const displayedRows = derived(tableStore, ($table) => {
-  let memo: {
-    columns: ColumnInfo[] | null;
-    rows: RowData[] | null;
-    searchRows: RowData[] | null;
-    filters: Record<string, Set<string | null>> | null;
-    search: SearchConfig | null;
-    sort: SortConfig | null;
-    out: RowData[];
-  } = { columns: null, rows: null, searchRows: null, filters: null, search: null, sort: null, out: [] };
-  if (memo.columns === $table.columns && memo.rows === $table.rows && memo.searchRows === $table.searchRows && memo.filters === $table.filters && memo.search === $table.search && memo.sort === $table.sort) {
+  const memo = displayedRowsMemo;
+  if (
+    memo &&
+    memo.columns === $table.columns &&
+    memo.rows === $table.rows &&
+    memo.searchRows === $table.searchRows &&
+    memo.filters === $table.filters &&
+    memo.search === $table.search &&
+    memo.sort === $table.sort
+  ) {
     return memo.out;
   }
   const out = visibleRows($table);
-  memo = {
+  displayedRowsMemo = {
     columns: $table.columns,
     rows: $table.rows,
     searchRows: $table.searchRows,

@@ -20,21 +20,21 @@ function setView(v: 'query' | 'data' | 'charts') {
   <div class="tabbar" role="tablist" aria-label="Workspace views">
     <button
       class="tab"
-      class:active={view === 'query'}
-      role="tab"
-      aria-selected={view === 'query'}
-      onclick={() => setView('query')}
-    >
-      Query
-    </button>
-    <button
-      class="tab"
       class:active={view === 'data'}
       role="tab"
       aria-selected={view === 'data'}
       onclick={() => setView('data')}
     >
       Data
+    </button>
+    <button
+      class="tab"
+      class:active={view === 'query'}
+      role="tab"
+      aria-selected={view === 'query'}
+      onclick={() => setView('query')}
+    >
+      Query
     </button>
     <button
       class="tab"
@@ -66,7 +66,14 @@ function setView(v: 'query' | 'data' | 'charts') {
         {/if}
       </div>
     {:else if view === 'data'}
-      <DataGrid />
+      {#if $tableStore.columns.length > 0}
+        <DataGrid />
+      {:else}
+        <div class="hint">
+          Click a table in the sidebar to preview it, or double-click to open it
+          for editing. Query results appear in the Query tab.
+        </div>
+      {/if}
     {:else}
       <div class="placeholder">
         <div class="placeholder-title">Charts</div>

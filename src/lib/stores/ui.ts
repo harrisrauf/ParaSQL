@@ -46,6 +46,21 @@ function createToastStore() {
 
 export const toastStore = createToastStore();
 
+function createQueryHistoryStore() {
+  const { subscribe, update } = writable<string[]>([]);
+  return {
+    subscribe,
+    push(sql: string) {
+      update(h => [sql, ...h.filter(q => q !== sql)].slice(0, 20));
+    },
+    clear() {
+      update(() => []);
+    },
+  };
+}
+
+export const queryHistoryStore = createQueryHistoryStore();
+
 export function notify(message: string, kind: Toast['kind'] = 'info') {
   toastStore.notify(message, kind);
 }

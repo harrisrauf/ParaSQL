@@ -35,6 +35,7 @@ pub fn run() {
             commands::export_json,
             commands::export_csv,
             commands::export_excel,
+            commands::export_query,
             commands::open_workspace,
             commands::save_workspace,
             commands::sync_workspace_tables,

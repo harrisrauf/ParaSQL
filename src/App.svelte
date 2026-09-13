@@ -13,7 +13,7 @@
   import { uiStore } from './lib/stores/ui';
   import { settings } from './lib/stores/settings';
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import { confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
+  import { confirmDialog } from './lib/dialogs';
   import {
     openFileFlow,
     openFolderFlow,
@@ -100,9 +100,11 @@
   }
 
   function handleContextMenu(e: MouseEvent) {
+    const target = e.target as HTMLElement;
+    // Editable elements keep their native menu (paste, cut, spellcheck)
+    if (target.closest('input, textarea, [contenteditable="true"], .cm-editor')) return;
     // Suppress the native webview context menu entirely
     e.preventDefault();
-    const target = e.target as HTMLElement;
     const cellValue = target.closest('.cell-value')?.textContent || '';
     const colEl = target.closest('.col-header') as HTMLElement | null;
     const colName = target.closest('.cell')?.getAttribute('data-col') || colEl?.getAttribute('data-col') || '';
@@ -112,6 +114,15 @@
     // Excel-style: right-clicking a row that isn't selected selects it first
     if (row && !$selectedRowIds.has(row.row_id)) {
       tableStore.selectRow(row.row_id);
+    }
+    // Prefer the raw cell value over the rendered text (null renders as "—").
+    const colIdx = colName ? $tableStore.columns.findIndex(c => c.name === colName) : -1;
+    let value = cellValue;
+    if (row && colIdx >= 0) {
+      const raw = row.values[colIdx];
+      value = raw === null || raw === undefined
+        ? ''
+        : typeof raw === 'object' ? JSON.stringify(raw) : String(raw);
     }
     const kind: 'cell' | 'row' | 'column' =
       target.closest('.col-header') ? 'column' :
@@ -126,7 +137,7 @@
       show: true,
       x: Math.min(e.clientX, window.innerWidth - menuW),
       y: Math.min(e.clientY, window.innerHeight - menuH),
-      value: cellValue,
+      value,
       colName,
       row,
       kind,
@@ -270,8 +281,8 @@
         <button onclick={handleDeleteRow}>Delete row</button>
         <div class="menu-sep"></div>
       {/if}
-      {#if contextMenu.value}
-        <button onclick={handleCopyValue}>Copy value</button>
+      {#if contextMenu.kind === 'cell' || contextMenu.value}
+        <button onclick={handleCopyValue}>Copy</button>
       {/if}
       {#if contextMenu.colName && contextMenu.value}
         <button onclick={handleCopyAsWhere}>Copy as WHERE clause</button>
