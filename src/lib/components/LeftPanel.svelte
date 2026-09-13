@@ -3,6 +3,7 @@
   import { tableStore } from '../stores/table';
   import { settings, type SchemaDialect } from '../stores/settings';
   import { generateSchema, getColumns, getAllRows, dropColumn, renameColumn, addColumn } from '../commands';
+  import { confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
 
   let columns = $derived($tableStore.columns);
   let activeTab = $derived($tableStore.activeTab);
@@ -54,7 +55,7 @@
 
   async function handleDrop(name: string) {
     if (!editable) return;
-    if (!confirm(`Delete column "${name}"? This can be undone.`)) return;
+    if (!(await confirmDialog(`Delete column "${name}"? This can be undone.`))) return;
     try {
       await dropColumn(name);
       const [rows, cols] = await Promise.all([getAllRows(), getColumns()]);

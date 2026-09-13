@@ -270,12 +270,24 @@ pub async fn redo(state: State<'_, AppState>) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn can_undo(state: State<'_, AppState>) -> Result<bool, String> {
-    with_editor(state, move |engine| Ok(engine.can_undo())).await
+    let engine = state.engine.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let eng = engine.lock().map_err(|e| format!("Lock error: {}", e))?;
+        Ok(eng.as_ref().is_some_and(|e| e.has_editor() && e.can_undo()))
+    })
+    .await
+    .map_err(|e| format!("Background task error: {}", e))?
 }
 
 #[tauri::command]
 pub async fn can_redo(state: State<'_, AppState>) -> Result<bool, String> {
-    with_editor(state, move |engine| Ok(engine.can_redo())).await
+    let engine = state.engine.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let eng = engine.lock().map_err(|e| format!("Lock error: {}", e))?;
+        Ok(eng.as_ref().is_some_and(|e| e.has_editor() && e.can_redo()))
+    })
+    .await
+    .map_err(|e| format!("Background task error: {}", e))?
 }
 
 #[tauri::command]

@@ -5,6 +5,7 @@ import { workspaceStore } from '../stores/workspace';
 import { tableStore } from '../stores/table';
 import * as a from '../actions';
 import type { WorkspaceTable, TableSummary } from '../types';
+import { confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
 
 let search = $state('');
 let selectedTable = $state<string | null>(null);
@@ -116,7 +117,7 @@ async function ctxRename() {
 async function ctxRemove() {
   const t = ctx.table;
   if (!t) return closeCtx();
-  if (confirm(`Remove "${t.name}" from the workspace? The file stays on disk.`)) {
+  if (await confirmDialog(`Remove "${t.name}" from the workspace? The file stays on disk.`)) {
     await a.removeTableFlow(t.name);
   }
   closeCtx();

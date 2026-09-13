@@ -13,6 +13,7 @@
   import { uiStore } from './lib/stores/ui';
   import { settings } from './lib/stores/settings';
   import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { confirm as confirmDialog } from '@tauri-apps/plugin-dialog';
   import {
     openFileFlow,
     openFolderFlow,
@@ -189,7 +190,7 @@
       const unsub = tableStore.subscribe(v => modified = v.modified);
       unsub();
       if (modified) {
-        const confirmed = await confirm('You have unsaved changes. Close anyway?');
+        const confirmed = await confirmDialog('You have unsaved changes. Close anyway?');
         if (!confirmed) {
           event.preventDefault();
         }

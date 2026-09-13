@@ -85,6 +85,13 @@ impl DuckDbEngine {
         ))
         .map_err(|e| format!("Failed to index row id: {}", e))?;
 
+        // Friendly alias so the SQL editor's default query works in single-file mode
+        conn.execute_batch(&format!(
+            "CREATE OR REPLACE VIEW working AS SELECT * FROM {}",
+            WORKING_TABLE
+        ))
+        .map_err(|e| format!("Failed to create working view: {}", e))?;
+
         Ok(Self {
             conn,
             table_name: WORKING_TABLE.to_string(),
@@ -124,6 +131,13 @@ impl DuckDbEngine {
             ROW_ID_INDEX, WORKING_TABLE, ROW_ID_COL
         ))
         .map_err(|e| format!("Failed to index row id: {}", e))?;
+
+        // Friendly alias so the SQL editor's default query works in single-file mode
+        conn.execute_batch(&format!(
+            "CREATE OR REPLACE VIEW working AS SELECT * FROM {}",
+            WORKING_TABLE
+        ))
+        .map_err(|e| format!("Failed to create working view: {}", e))?;
 
         Ok(Self {
             conn,
@@ -386,14 +400,31 @@ impl DuckDbEngine {
         let schema = batch.schema();
         let fields = schema.fields();
         let skip = if !fields.is_empty() && fields[0].name() == ROW_ID_COL { 1 } else { 0 };
+        // The grid keys columns by name; make duplicate aliases unique so
+        // `SELECT 1 AS x, 2 AS x` cannot collide in the frontend.
+        let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
         let columns = fields
             .iter()
             .enumerate()
             .filter(|(i, _)| *i >= skip)
-            .map(|(_, f)| ColumnInfo {
-                name: f.name().clone(),
-                dtype: format!("{:?}", f.data_type()),
-                nullable: f.is_nullable(),
+            .map(|(_, f)| {
+                let mut name = f.name().clone();
+                if !used.insert(name.clone()) {
+                    let mut i = 2;
+                    loop {
+                        let candidate = format!("{}_{}", name, i);
+                        if used.insert(candidate.clone()) {
+                            name = candidate;
+                            break;
+                        }
+                        i += 1;
+                    }
+                }
+                ColumnInfo {
+                    name,
+                    dtype: format!("{:?}", f.data_type()),
+                    nullable: f.is_nullable(),
+                }
             })
             .collect();
         let rows = rows_from_batch(&batch, 0)?;
@@ -1593,10 +1624,22 @@ pub fn arrow_array_to_json(array: &dyn Array, row_idx: usize) -> JsonValue {
     if let Some(arr) = array.as_any().downcast_ref::<Int32Array>() {
         return JsonValue::Number((arr.value(row_idx) as i64).into());
     }
+    if let Some(arr) = array.as_any().downcast_ref::<Int16Array>() {
+        return JsonValue::Number((arr.value(row_idx) as i64).into());
+    }
+    if let Some(arr) = array.as_any().downcast_ref::<Int8Array>() {
+        return JsonValue::Number((arr.value(row_idx) as i64).into());
+    }
     if let Some(arr) = array.as_any().downcast_ref::<UInt64Array>() {
         return JsonValue::Number(arr.value(row_idx).into());
     }
     if let Some(arr) = array.as_any().downcast_ref::<UInt32Array>() {
+        return JsonValue::Number((arr.value(row_idx) as i64).into());
+    }
+    if let Some(arr) = array.as_any().downcast_ref::<UInt16Array>() {
+        return JsonValue::Number((arr.value(row_idx) as i64).into());
+    }
+    if let Some(arr) = array.as_any().downcast_ref::<UInt8Array>() {
         return JsonValue::Number((arr.value(row_idx) as i64).into());
     }
     if let Some(arr) = array.as_any().downcast_ref::<Float64Array>() {
@@ -1682,11 +1725,25 @@ pub fn arrow_array_to_json(array: &dyn Array, row_idx: usize) -> JsonValue {
         return JsonValue::String(format!("[{} bytes: {}{}]", bytes.len(), preview, suffix));
     }
 
-    // Decimal types
+    // Decimal types. HUGEINT (SUM over integers) arrives as Decimal128(38,0)
+    // with scale 0 — emit it as a number when it fits, so results stay numeric
+    // (client-side sorting, charts and exports treat strings as text).
     if let Some(arr) = array.as_any().downcast_ref::<Decimal128Array>() {
+        if arr.scale() == 0 {
+            if let Ok(v) = i64::try_from(arr.value(row_idx)) {
+                return JsonValue::Number(v.into());
+            }
+        }
         return JsonValue::String(arr.value_as_string(row_idx).to_string());
     }
     if let Some(arr) = array.as_any().downcast_ref::<Decimal256Array>() {
+        if arr.scale() == 0 {
+            if let Some(v) = arr.value(row_idx).to_i128() {
+                if let Ok(v) = i64::try_from(v) {
+                    return JsonValue::Number(v.into());
+                }
+            }
+        }
         return JsonValue::String(arr.value_as_string(row_idx).to_string());
     }
 
