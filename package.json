@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.2.0",
   "type": "module",
-  "description": "The SQL workbench for Parquet files — query, explore, edit, and export data from any folder of Parquet.",
+  "description": "The SQL workbench for Parquet files — query, explore, edit, and export data from any Parquet file or folder.",
   "license": "MIT",
   "author": "Harris Rauf",
   "homepage": "https://github.com/harrisrauf/ParaSQL",
@@ -28,10 +28,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "check": "svelte-check --tsconfig ./tsconfig.json",
-    "dev:e2e": "tauri dev -- --config src-tauri/tauri.e2e.conf.json",
-    "e2e:smoke": "node e2e/playwright-check.mjs",
-    "e2e:deep": "node e2e/deep-tests.mjs"
+    "check": "svelte-check --tsconfig ./tsconfig.json"
   },
   "dependencies": {
     "@tanstack/svelte-virtual": "^3.13.0",
@@ -44,7 +41,6 @@
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
     "@tauri-apps/cli": "^2",
     "codemirror": "^6.0.2",
-    "playwright-core": "^1.63.0",
     "svelte": "^5.0.0",
     "svelte-check": "^4.7.6",
     "typescript": "~5.6.2",

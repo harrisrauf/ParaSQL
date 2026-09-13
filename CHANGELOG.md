@@ -36,8 +36,8 @@ The first public release of ParaSQL — a full Parquet workbench, not just a vie
   tables and arbitrary query results; table summaries via DuckDB `SUMMARIZE`.
 - **Undo / redo** with exact round-trips, including BLOBs, microsecond
   timestamps, arrays, structs, and maps.
-- **E2E test harness** driven by Playwright over the WebView2 CDP endpoint,
-  with a DEV-only dialog seam (107 deep checks + 12 smoke checks).
+- **Unit test suite** for the DuckDB engine, workspace catalog, undo
+  fidelity, and export paths (`cargo test --lib`).
 - Application branding: ParaSQL identity, icons, and a portable demo workspace
   included in `Sample_data/`.
 

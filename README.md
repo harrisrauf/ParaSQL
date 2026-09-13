@@ -5,8 +5,8 @@
 # ParaSQL
 
 **The SQL workbench for Parquet files.**
-Query, explore, edit, and ship data from any folder of Parquet — with the power of DuckDB
-and the feel of a spreadsheet.
+Query, explore, edit, and ship data from any Parquet file or folder — with the
+power of DuckDB and the feel of a spreadsheet.
 
 [![CI](https://github.com/harrisrauf/ParaSQL/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/harrisrauf/ParaSQL/actions/workflows/ci.yml)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
@@ -18,6 +18,8 @@ and the feel of a spreadsheet.
 ![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)
 
 [Quick start](#quick-start) · [Features](#features) · [Performance](#performance) · [Technical specifications](#technical-specifications) · [Roadmap](#roadmap) · [Contributing](CONTRIBUTING.md)
+
+<img src="docs/assets/social-preview.png" alt="ParaSQL — the SQL workbench for Parquet files" />
 
 </div>
 
@@ -31,11 +33,9 @@ I started building ParaSQL while I was learning — I was creating my own
 embeddings model for a larger product I had in mind.
 
 A surprising amount of that work wasn't modelling at all: it was sorting through,
-cleaning, and modifying a lot of Parquet data. Every tool I tried made it harder
-than it had to be. Viewers opened one file and nothing else. CLIs needed a script
-for every small change. BI platforms wanted a server, and cloud services wanted
-my data. I just wanted to open my files, look at them, fix them, and query across
-them.
+cleaning, and modifying a lot of Parquet data. I wanted to open a file, fix rows
+and columns, and query across many files — without writing a script for every
+small change.
 
 So I started building the tool I needed. ParaSQL began as a single-file Parquet
 editor and grew into something bigger: a multi-file analysis and database
@@ -90,7 +90,7 @@ notebooks, and AI-assisted dataset summaries — still local, still private.
 
 ## Performance
 
-Real numbers from the bundled 500k-row benchmark file on Windows 11
+Real numbers from a 500,000-row Parquet file on Windows 11
 (dev build, mid-range laptop — your mileage will vary):
 
 | Operation | Result |
@@ -113,21 +113,6 @@ materialize more than you ask for.
   warehouse.
 - **Anyone** with a folder full of Parquet files and no good way to look inside.
 
-## How it compares
-
-A rough comparison — every tool here is great at something; ParaSQL is the one
-that does *all* of this in a single desktop app:
-
-| | ParaSQL | DuckDB CLI | Parquet viewers | SQL IDEs | BI platforms |
-| --- | :-: | :-: | :-: | :-: | :-: |
-| GUI data grid w/ editing | ✅ single file | ❌ | ✅ (read-only) | ✅ | ❌ |
-| SQL with cross-file joins | ✅ | ✅ | ❌ | ⚠️ varies | ✅ |
-| Portable multi-file workspace | ✅ | ⚠️ scripts | ❌ | ❌ | ⚠️ server |
-| Undo/redo for data edits | ✅ | ❌ | ❌ | ⚠️ | ❌ |
-| Export Parquet/CSV/Excel/JSON | ✅ | ✅ | ⚠️ | ⚠️ | ⚠️ |
-| Local-only, no server | ✅ | ✅ | ✅ | ✅ | ❌ |
-| Free & open source | ✅ | ✅ | ✅ | ⚠️ | ⚠️ |
-
 ## Quick start
 
 ### Install
@@ -147,6 +132,23 @@ npm run tauri dev        # or: npm run tauri build
 
 Prerequisites: Node 20+, stable Rust, and (on Windows) the WebView2 runtime
 which ships with Windows 10/11.
+
+### Build the Windows installer in one command
+
+```bash
+npm install
+npx tauri build --bundles nsis
+```
+
+That writes `src-tauri/target/release/bundle/nsis/ParaSQL_<version>_x64-setup.exe`.
+Launch the installer straight from your terminal — no folder browsing needed:
+
+```bash
+src-tauri\target\release\bundle\nsis\ParaSQL_0.2.0_x64-setup.exe
+```
+
+Plain `npx tauri build` builds both the `.msi` and the `.exe` setup; on macOS
+and Linux the same command produces `.dmg` / `.AppImage` / `.deb`.
 
 ### First five minutes
 
@@ -215,7 +217,7 @@ which ships with Windows 10/11.
 | Engine | [DuckDB 1.5](https://duckdb.org) (bundled), [Arrow](https://arrow.apache.org) |
 | Frontend | [Svelte 5](https://svelte.dev) + TypeScript, CodeMirror 6, TanStack Virtual |
 | Formats | Parquet (Snappy/Zstd/Gzip/LZ4/Brotli), CSV, JSON, XLSX |
-| Tests | Rust unit tests, Playwright-over-CDP E2E (107 deep + 12 smoke checks) |
+| Tests | Rust unit tests — engine, undo fidelity, workspace catalog, exports |
 | CI | GitHub Actions — `svelte-check`, frontend build, `cargo test --lib` |
 
 ### Engineering notes

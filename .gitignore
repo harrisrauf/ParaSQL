@@ -9,7 +9,3 @@ node_modules
 !.env.example
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
-.e2e-dev.log
-.tauri-build.log
-/docs/superpowers/
-opencode.json

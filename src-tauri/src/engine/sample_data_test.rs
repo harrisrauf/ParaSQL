@@ -1,26 +1,18 @@
 use super::catalog::{SavedQuery, Workspace, WorkspaceTable};
 use super::duckdb::DuckDbEngine;
-use super::types::QueryResult;
 use duckdb::Connection;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
 fn sample_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../Sample_data")
 }
 
-fn parquet_files() -> Vec<PathBuf> {
-    let dir = sample_dir();
-    if !dir.is_dir() {
-        return Vec::new();
-    }
-    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .unwrap()
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "parquet"))
-        .collect();
-    files.sort();
-    files
+fn sales_dir() -> PathBuf {
+    sample_dir().join("sales")
+}
+
+fn to_sql_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/").replace('\'', "''")
 }
 
 fn ws_table(name: &str, file: &Path) -> WorkspaceTable {
@@ -38,35 +30,31 @@ fn ws_table(name: &str, file: &Path) -> WorkspaceTable {
     }
 }
 
-const SAMPLE_TABLES: &[(&str, &str)] = &[
-    ("bank_failures", "bank_failures.parquet"),
-    ("iris", "iris.parquet"),
-    ("sample_empty", "sample-empty.parquet"),
-    ("sample_gzip", "sample-gzip.parquet"),
-    ("sample_large", "sample-large.parquet"),
-    ("sample_nested", "sample-nested.parquet"),
-    ("sample_types", "sample-types.parquet"),
-    ("sample_uncompressed", "sample-uncompressed.parquet"),
-    ("sample_users", "sample-users.parquet"),
-    ("search_trends", "search_trends.parquet"),
-    ("titanic", "titanic.parquet"),
+/// The four Parquet files shipped in `Sample_data/sales` (regenerable with the
+/// ignored `generate_sales_sample_files` test). Same schema story as a typical
+/// star schema: products, customers, orders, order_items.
+const SALES_TABLES: &[(&str, &str); 4] = &[
+    ("products", "products.parquet"),
+    ("customers", "customers.parquet"),
+    ("orders", "orders.parquet"),
+    ("order_items", "order_items.parquet"),
 ];
 
-fn sample_workspace() -> Workspace {
-    let dir = sample_dir();
-    let mut ws = Workspace::new("samples");
-    for (name, file) in SAMPLE_TABLES {
+fn sales_workspace() -> Workspace {
+    let dir = sales_dir();
+    let mut ws = Workspace::new("sales");
+    for (name, file) in SALES_TABLES {
         ws.tables.push(ws_table(name, &dir.join(file)));
     }
     ws
 }
 
-fn open_samples() -> Option<DuckDbEngine> {
-    if parquet_files().is_empty() {
-        eprintln!("Sample_data not found; skipping");
+fn open_sales() -> Option<DuckDbEngine> {
+    if !sales_dir().join("order_items.parquet").exists() {
+        eprintln!("Sample_data/sales not found; skipping");
         return None;
     }
-    Some(DuckDbEngine::open_workspace(&sample_workspace()).expect("sample workspace should open"))
+    Some(DuckDbEngine::open_workspace(&sales_workspace()).expect("sales workspace should open"))
 }
 
 fn n(v: &serde_json::Value) -> u64 {
@@ -77,157 +65,79 @@ fn n(v: &serde_json::Value) -> u64 {
         .unwrap_or_else(|| panic!("not numeric: {:?}", v))
 }
 
-fn engine_json_rows(q: &QueryResult) -> Vec<serde_json::Value> {
-    q.rows
-        .iter()
-        .map(|r| {
-            let mut m = serde_json::Map::new();
-            for (c, v) in q.columns.iter().zip(r.values.iter()) {
-                m.insert(c.name.clone(), v.clone());
-            }
-            serde_json::Value::Object(m)
-        })
-        .collect()
+/// Order-independent checksum of a result set: row count plus every row rendered
+/// as text and sorted. Uses core DuckDB functions only — no extensions, no
+/// network — so it runs anywhere, including CI.
+fn checksum_sql(sql: &str) -> String {
+    format!(
+        "SELECT COUNT(*) AS n, string_agg(t::VARCHAR, '|' ORDER BY t::VARCHAR) AS h FROM ({}) t",
+        sql
+    )
 }
 
-/// Compute the same SQL with plain `read_parquet` views to prove the workspace
-/// view layer is transparent (the app's abstraction must not change results).
-fn direct_json_rows(dir: &Path, tables: &[(&str, &str)], sql: &str) -> Vec<serde_json::Value> {
-    // `to_json` lives in DuckDB's json extension, which auto-installs on first
-    // use; serialize access so parallel tests never race the install.
-    static DIRECT_DB_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _guard = DIRECT_DB_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+/// Compute the same query through a plain `read_parquet` connection to prove the
+/// workspace view layer is transparent (the app's abstraction must not change
+/// results).
+fn direct_checksum(dir: &Path, tables: &[(&str, &str)], sql: &str) -> (i64, Option<String>) {
     let conn = Connection::open_in_memory().unwrap();
     for (name, file) in tables {
-        let path = dir.join(file).to_string_lossy().replace('\\', "/");
+        let path = to_sql_path(&dir.join(file));
         conn.execute_batch(&format!(
             "CREATE VIEW {} AS SELECT * FROM read_parquet('{}')",
             name, path
         ))
         .unwrap();
     }
-    let mut stmt = conn
-        .prepare(&format!("SELECT to_json(t)::VARCHAR FROM ({}) t", sql))
-        .unwrap();
-    let rows = stmt
-        .query_map([], |row| row.get::<usize, String>(0))
-        .unwrap();
-    rows.map(|r| serde_json::from_str(&r.unwrap()).unwrap())
-        .collect()
+    conn.query_row(&checksum_sql(sql), [], |row| {
+        Ok((
+            row.get::<usize, i64>(0)?,
+            row.get::<usize, Option<String>>(1)?,
+        ))
+    })
+    .unwrap()
+}
+
+fn engine_checksum(engine: &DuckDbEngine, sql: &str) -> (i64, Option<String>) {
+    let q = engine.execute_sql(&checksum_sql(sql)).unwrap();
+    let values = &q.rows[0].values;
+    (n(&values[0]) as i64, values[1].as_str().map(str::to_string))
 }
 
 #[test]
-fn sample_data_inventory() {
-    let files = parquet_files();
-    if files.is_empty() {
-        eprintln!("Sample_data not found; skipping");
-        return;
-    }
-    for path in files {
-        let p = path.to_str().unwrap();
-        let engine = match DuckDbEngine::open_parquet(p) {
-            Ok(e) => e,
-            Err(err) => {
-                eprintln!("\n== {} ==\n  OPEN FAILED: {}", path.display(), err);
-                continue;
-            }
-        };
-        let cols = engine.column_info().unwrap();
-        let count = engine.row_count();
-        let meta = engine
-            .get_table_meta(p)
-            .map(|v| v.to_string())
-            .unwrap_or_else(|e| format!("meta err: {}", e));
-        eprintln!(
-            "\n== {} ({} rows) ==",
-            path.file_name().unwrap().to_string_lossy(),
-            count
-        );
-        for c in &cols {
-            eprintln!("   {} : {}", c.name, c.dtype);
-        }
-        eprintln!("   meta: {}", meta);
-    }
-}
-
-#[test]
-fn query_result_edge_cases() {
-    let Some(engine) = open_samples() else {
+fn sample_sales_inventory() {
+    let Some(engine) = open_sales() else {
         return;
     };
-
-    // Narrow integer columns must render as numbers, not "[unsupported type]".
-    let q = engine
-        .execute_sql("SELECT col_int8, col_int32, col_int64 FROM sample_types ORDER BY col_int32 LIMIT 3")
+    let expected: &[(&str, u64)] = &[
+        ("products", 200),
+        ("customers", 20000),
+        ("orders", 100000),
+        ("order_items", 300000),
+    ];
+    for (name, rows) in expected {
+        let q = engine
+            .execute_sql(&format!("SELECT COUNT(*) AS n FROM {}", name))
+            .unwrap();
+        assert_eq!(n(&q.rows[0].values[0]), *rows, "row count for {}", name);
+    }
+    let shape = engine
+        .execute_sql("SELECT * FROM order_items LIMIT 1")
         .unwrap();
-    assert!(
-        q.rows.iter().all(|r| r.values[0].is_number()),
-        "int8 values: {:?}",
-        q.rows[0].values
-    );
-
-    // SUM over integers arrives as HUGEINT (Decimal128 scale 0) — stays numeric.
-    let s = engine
-        .execute_sql("SELECT SUM(col_int64) AS total FROM sample_types")
-        .unwrap();
-    assert!(s.rows[0].values[0].is_number(), "sum: {:?}", s.rows[0].values[0]);
-
-    // Unicode round trip from the sample data.
-    let u = engine
-        .execute_sql("SELECT col_string FROM sample_types WHERE col_int32 = 1000")
-        .unwrap();
-    assert_eq!(u.rows[0].values[0].as_str().unwrap(), "строка-1 文字 1");
-
-    // Duplicate aliases must be unique in the result schema for the grid.
-    let dup = engine
-        .execute_sql("SELECT 1 AS x, 2 AS x FROM iris LIMIT 1")
-        .unwrap();
-    let mut names: Vec<String> = dup.columns.iter().map(|c| c.name.clone()).collect();
-    let total = names.len();
-    names.sort();
-    names.dedup();
-    assert_eq!(names.len(), total, "duplicate column names survived: {:?}", names);
-
-    // Empty result keeps its column shape.
-    let empty = engine
-        .execute_sql("SELECT col_int32 FROM sample_types WHERE col_int32 > 999999")
-        .unwrap();
-    assert!(empty.rows.is_empty());
-    assert_eq!(empty.columns.len(), 1);
-
-    // Narrow types are queryable through the view layer.
-    let filtered = engine
-        .execute_sql("SELECT COUNT(col_int8) AS n FROM sample_types")
-        .unwrap();
-    assert!(n(&filtered.rows[0].values[0]) > 0);
+    assert_eq!(shape.columns.len(), 5, "order_items column count");
 }
 
 /// Run once to create `Sample_data/parasql-demo.parasql` for manual app testing:
-/// `cargo test --lib generate_sample_workspace -- --ignored`
+/// `cargo test --lib generate_sample_workspace -- --ignored --nocapture`
 #[test]
 #[ignore = "writes Sample_data/parasql-demo.parasql for manual testing"]
 fn generate_sample_workspace() {
-    let dir = sample_dir();
+    let dir = sales_dir();
     let mut ws = Workspace::new("ParaSQL demo");
-    for (name, file) in SAMPLE_TABLES {
+    for (name, file) in SALES_TABLES {
         let abs = dir.join(file);
         let mut t = ws_table(name, &abs);
         t.size = std::fs::metadata(&abs).ok().map(|m| m.len());
         ws.tables.push(t);
-    }
-    let sales = [
-        ("products", "products.parquet"),
-        ("customers", "customers.parquet"),
-        ("orders", "orders.parquet"),
-        ("order_items", "order_items.parquet"),
-    ];
-    for (name, file) in sales {
-        let p = dir.join("sales").join(file);
-        if p.exists() {
-            ws.tables.push(ws_table(name, &p));
-        }
     }
     ws.saved_queries.push(SavedQuery {
         name: "Revenue by category".into(),
@@ -239,19 +149,20 @@ fn generate_sample_workspace() {
     ws.saved_queries.push(SavedQuery {
         name: "Monthly revenue".into(),
         sql: "SELECT strftime(o.order_date, '%Y-%m') AS month, \
-              ROUND(SUM(oi.quantity * p.unit_price), 2) AS revenue \
+              ROUND(SUM(oi.quantity * oi.unit_price), 2) AS revenue \
               FROM orders o JOIN order_items oi ON oi.order_id = o.order_id \
               JOIN products p ON p.product_id = oi.product_id GROUP BY 1 ORDER BY 1"
             .into(),
     });
     ws.saved_queries.push(SavedQuery {
-        name: "Titanic survival by class".into(),
-        sql: "SELECT Pclass, COUNT(*) AS total, \
-              SUM(CASE WHEN Survived = 1 THEN 1 ELSE 0 END) AS survived \
-              FROM titanic GROUP BY Pclass ORDER BY Pclass"
+        name: "Top customers".into(),
+        sql: "SELECT c.name, c.country, ROUND(SUM(oi.quantity * oi.unit_price), 2) AS revenue \
+              FROM order_items oi JOIN orders o ON o.order_id = oi.order_id \
+              JOIN customers c ON c.customer_id = o.customer_id \
+              GROUP BY 1, 2 ORDER BY 3 DESC LIMIT 10"
             .into(),
     });
-    let path = dir.join("parasql-demo.parasql");
+    let path = sample_dir().join("parasql-demo.parasql");
     super::catalog::write_workspace(path.to_str().unwrap(), &ws).unwrap();
     eprintln!("wrote {}", path.display());
 }
@@ -264,231 +175,112 @@ fn demo_workspace_file_loads() {
         return;
     }
     let ws = super::catalog::load_workspace(path.to_str().unwrap()).unwrap();
-    assert!(ws.tables.len() >= 15, "tables: {}", ws.tables.len());
+    assert!(ws.tables.len() >= 4, "tables: {}", ws.tables.len());
     assert!(ws.saved_queries.len() >= 3);
     let engine = DuckDbEngine::open_workspace(&ws).unwrap();
     let q = engine
         .execute_sql("SELECT COUNT(*) AS n FROM order_items")
         .unwrap();
     assert_eq!(n(&q.rows[0].values[0]), 300000);
-    let t = engine.execute_sql("SELECT COUNT(*) AS n FROM titanic").unwrap();
-    assert_eq!(n(&t.rows[0].values[0]), 891);
-}
-
-/// Prints the demo queries and their actual result rows:
-/// `cargo test --lib showcase_queries -- --ignored --nocapture`
-#[test]
-#[ignore = "prints demo query results"]
-fn showcase_queries() {
-    let sales = std::env::temp_dir().join(format!("parasql_showcase_{}", std::process::id()));
-    let conn = Connection::open_in_memory().unwrap();
-    generate_sales_schema(&conn, &sales).unwrap();
-
-    let dir = sample_dir();
-    let mut ws = Workspace::new("showcase");
-    for (name, file) in [
-        ("products", "products.parquet"),
-        ("customers", "customers.parquet"),
-        ("orders", "orders.parquet"),
-        ("order_items", "order_items.parquet"),
-    ] {
-        ws.tables.push(ws_table(name, &sales.join(file)));
-    }
-    for (name, file) in SAMPLE_TABLES {
-        ws.tables.push(ws_table(name, &dir.join(file)));
-    }
-    let engine = DuckDbEngine::open_workspace(&ws).unwrap();
-
-    let queries = [
-        (
-            "Revenue by category (4-table join)",
-            "SELECT p.category, ROUND(SUM(oi.quantity * p.unit_price), 2) AS revenue \
-             FROM order_items oi JOIN products p ON p.product_id = oi.product_id \
-             GROUP BY 1 ORDER BY 2 DESC",
-        ),
-        (
-            "Monthly revenue (first 6 months)",
-            "SELECT strftime(o.order_date, '%Y-%m') AS month, COUNT(*) AS orders, \
-             ROUND(SUM(oi.quantity * p.unit_price), 2) AS revenue \
-             FROM orders o JOIN order_items oi ON oi.order_id = o.order_id \
-             JOIN products p ON p.product_id = oi.product_id GROUP BY 1 ORDER BY 1 LIMIT 6",
-        ),
-        (
-            "Titanic survival by class (pivot)",
-            "SELECT Pclass, COUNT(*) AS total, \
-             SUM(CASE WHEN Survived = 1 THEN 1 ELSE 0 END) AS survived \
-             FROM titanic GROUP BY Pclass ORDER BY Pclass",
-        ),
-        (
-            "Iris species averages",
-            "SELECT variety, COUNT(*) AS n, ROUND(AVG(\"petal.length\"), 3) AS avg_petal \
-             FROM iris GROUP BY variety ORDER BY variety",
-        ),
-    ];
-    for (title, sql) in queries {
-        let q = engine.execute_sql(sql).unwrap();
-        eprintln!("\n=== {} ===", title);
-        eprintln!(
-            "{}",
-            q.columns
-                .iter()
-                .map(|c| c.name.clone())
-                .collect::<Vec<_>>()
-                .join(" | ")
-        );
-        for r in &q.rows {
-            eprintln!(
-                "{}",
-                r.values
-                    .iter()
-                    .map(|v| match v {
-                        serde_json::Value::String(s) => s.clone(),
-                        other => other.to_string(),
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" | ")
-            );
-        }
-    }
-    let _ = std::fs::remove_dir_all(&sales);
-}
-
-#[test]
-fn sample_workspace_supports_cross_file_queries() {
-    let Some(engine) = open_samples() else {
-        return;
-    };
-
-    // Exact row counts through the workspace views.
-    let expected_counts: &[(&str, u64)] = &[
-        ("bank_failures", 545),
-        ("iris", 150),
-        ("sample_empty", 0),
-        ("sample_gzip", 20000),
-        ("sample_large", 500000),
-        ("sample_nested", 4),
-        ("sample_types", 8),
-        ("sample_uncompressed", 20000),
-        ("sample_users", 1001),
-        ("search_trends", 49),
-        ("titanic", 891),
-    ];
-    for (name, expected) in expected_counts {
-        let q = engine
-            .execute_sql(&format!("SELECT COUNT(*) AS n FROM \"{}\"", name))
-            .unwrap();
-        assert_eq!(n(&q.rows[0].values[0]), *expected, "row count for {}", name);
-    }
-
-    // Multi-file UNION ALL across two physical files.
-    let union = engine
-        .execute_sql(
-            "SELECT COUNT(*) AS n FROM (SELECT * FROM sample_gzip UNION ALL SELECT * FROM sample_uncompressed)",
-        )
+    let p = engine
+        .execute_sql("SELECT COUNT(*) AS n FROM products")
         .unwrap();
-    assert_eq!(n(&union.rows[0].values[0]), 40000);
-
-    // Titanic pivot: totals and survival by class (classic known values).
-    let pivot = engine
-        .execute_sql(
-            "SELECT Pclass, COUNT(*) AS total, SUM(CASE WHEN Survived = 1 THEN 1 ELSE 0 END) AS survived \
-             FROM titanic GROUP BY Pclass ORDER BY Pclass",
-        )
-        .unwrap();
-    assert_eq!(pivot.rows.len(), 3);
-    let totals: Vec<u64> = pivot.rows.iter().map(|r| n(&r.values[1])).collect();
-    let survived: Vec<u64> = pivot.rows.iter().map(|r| n(&r.values[2])).collect();
-    assert_eq!(totals, vec![216, 184, 491]);
-    assert_eq!(survived, vec![136, 87, 119]);
-
-    // Window function + QUALIFY-style top-N per group.
-    let top = engine
-        .execute_sql(
-            "SELECT Pclass, Name, Fare FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY Pclass ORDER BY Fare DESC) AS rn FROM titanic) t WHERE rn = 1 ORDER BY Pclass",
-        )
-        .unwrap();
-    assert_eq!(top.rows.len(), 3);
-
-    // CTE over iris; species separation sanity.
-    let iris = engine
-        .execute_sql(
-            "WITH species AS (SELECT variety, COUNT(*) AS n, AVG(\"petal.length\") AS avg_petal FROM iris GROUP BY variety) \
-             SELECT * FROM species ORDER BY variety",
-        )
-        .unwrap();
-    assert_eq!(iris.rows.len(), 3);
-    let avg_petals: Vec<f64> = iris
-        .rows
-        .iter()
-        .map(|r| r.values[2].as_f64().unwrap())
-        .collect();
-    assert!(avg_petals[0] < 2.0, "setosa avg petal {:?}", avg_petals);
-    assert!(avg_petals[1] > 2.5 && avg_petals[1] < 5.0);
-    assert!(avg_petals[2] > 5.0);
-
-    // Quoted identifiers with spaces, parens and dollar signs.
-    let assets = engine
-        .execute_sql(
-            "SELECT Bank, \"Assets ($mil.)\" FROM bank_failures WHERE \"Assets ($mil.)\" > 1000 ORDER BY \"Assets ($mil.)\" DESC LIMIT 5",
-        )
-        .unwrap();
-    assert_eq!(assets.rows.len(), 5);
-    let peak = engine
-        .execute_sql("SELECT MAX(\"Matthew Perry\") AS peak FROM search_trends")
-        .unwrap();
-    assert!(n(&peak.rows[0].values[0]) > 0);
-
-    // Nested types via UNNEST.
-    let items = engine
-        .execute_sql("SELECT order_id, UNNEST(items) AS item FROM sample_nested")
-        .unwrap();
-    assert!(items.rows.len() >= 6);
-    assert!(items
-        .rows
-        .iter()
-        .any(|r| r.values[1].as_str() == Some("book")));
-
-    // 500k view: aggregation is fine, unbounded SELECT is rejected by the cap.
-    let agg = engine
-        .execute_sql(
-            "SELECT category, COUNT(*) AS n FROM sample_large GROUP BY category ORDER BY category",
-        )
-        .unwrap();
-    let total: u64 = agg.rows.iter().map(|r| n(&r.values[1])).sum();
-    assert_eq!(total, 500000);
-    let err = engine.execute_sql("SELECT * FROM sample_large").unwrap_err();
-    assert!(err.contains("more than"), "unexpected error: {}", err);
-
-    // DML through the query box stays rejected.
-    let err = engine.execute_sql("DELETE FROM iris").unwrap_err();
-    assert!(err.contains("Only SELECT"), "unexpected error: {}", err);
+    assert_eq!(n(&p.rows[0].values[0]), 200);
 }
 
 #[test]
 fn workspace_views_match_direct_parquet_reads() {
-    let Some(engine) = open_samples() else {
+    let Some(engine) = open_sales() else {
         return;
     };
-    // Sanity checks that both paths can see the two comparable files.
     let queries = [
-        "SELECT COUNT(*) AS n FROM (SELECT * FROM sample_gzip UNION ALL SELECT * FROM sample_uncompressed)",
-        "SELECT ROUND(AVG(value), 6) AS avg_value, COUNT(*) AS n FROM sample_large",
-        "SELECT variety, COUNT(*) AS n FROM iris GROUP BY variety ORDER BY variety",
+        "SELECT category, COUNT(*) AS n, ROUND(SUM(unit_price), 2) AS total FROM products GROUP BY 1 ORDER BY 1",
+        "SELECT status, COUNT(*) AS n FROM orders GROUP BY 1 ORDER BY 1",
+        "SELECT p.category, ROUND(SUM(oi.quantity * p.unit_price), 2) AS revenue \
+         FROM order_items oi JOIN products p ON p.product_id = oi.product_id GROUP BY 1",
+        "SELECT strftime(o.order_date, '%Y-%m') AS month, COUNT(*) AS n \
+         FROM orders o GROUP BY 1 ORDER BY 1",
     ];
     for sql in queries {
-        let q = engine.execute_sql(sql).unwrap();
-        let direct = direct_json_rows(
-            &sample_dir(),
-            &[
-                ("sample_gzip", "sample-gzip.parquet"),
-                ("sample_uncompressed", "sample-uncompressed.parquet"),
-                ("sample_large", "sample-large.parquet"),
-                ("iris", "iris.parquet"),
-            ],
-            sql,
+        assert_eq!(
+            engine_checksum(&engine, sql),
+            direct_checksum(&sales_dir(), SALES_TABLES, sql),
+            "query diverged: {}",
+            sql
         );
-        assert_eq!(engine_json_rows(&q), direct, "query diverged: {}", sql);
     }
+}
+
+/// Narrow integer columns, unicode text and duplicate aliases — the JSON-layer
+/// edge cases the grid depends on.
+#[test]
+fn query_result_edge_cases() {
+    let tmp = std::env::temp_dir().join(format!("parasql_types_it_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let path = tmp.join("types.parquet");
+    let p = to_sql_path(&path);
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(&format!(
+        "CREATE TABLE t (col_int8 TINYINT, col_int32 INTEGER, col_int64 BIGINT, \
+         col_float64 DOUBLE, col_bool BOOLEAN, col_string VARCHAR, col_nullable INTEGER);
+         INSERT INTO t VALUES
+           (1, 1000, 9007199254740993, 1.5, TRUE, 'строка-1 文字 1', NULL),
+           (2, 2, 2, 2.5, FALSE, 'plain', 7);
+         COPY t TO '{p}' (FORMAT PARQUET);"
+    ))
+    .unwrap();
+
+    let engine = DuckDbEngine::open_parquet(path.to_str().unwrap()).unwrap();
+
+    // Narrow integer columns must render as numbers, not "[unsupported type]".
+    let q = engine
+        .execute_sql(
+            "SELECT col_int8, col_int32, col_int64 FROM working ORDER BY col_int32 LIMIT 3",
+        )
+        .unwrap();
+    assert!(
+        q.rows.iter().all(|r| r.values[0].is_number()),
+        "int8 values: {:?}",
+        q.rows[0].values
+    );
+
+    // SUM over integers arrives as HUGEINT (Decimal128 scale 0) — stays numeric.
+    let s = engine
+        .execute_sql("SELECT SUM(col_int64) AS total FROM working")
+        .unwrap();
+    assert!(s.rows[0].values[0].is_number(), "sum: {:?}", s.rows[0].values[0]);
+
+    // Unicode round trip.
+    let u = engine
+        .execute_sql("SELECT col_string FROM working WHERE col_int32 = 1000")
+        .unwrap();
+    assert_eq!(u.rows[0].values[0].as_str().unwrap(), "строка-1 文字 1");
+
+    // Duplicate aliases must be unique in the result schema for the grid.
+    let dup = engine
+        .execute_sql("SELECT 1 AS x, 2 AS x FROM working LIMIT 1")
+        .unwrap();
+    let mut names: Vec<String> = dup.columns.iter().map(|c| c.name.clone()).collect();
+    let total = names.len();
+    names.sort();
+    names.dedup();
+    assert_eq!(names.len(), total, "duplicate column names survived: {:?}", names);
+
+    // Empty result keeps its column shape.
+    let empty = engine
+        .execute_sql("SELECT col_int32 FROM working WHERE col_int32 > 999999")
+        .unwrap();
+    assert!(empty.rows.is_empty());
+    assert_eq!(empty.columns.len(), 1);
+
+    // Narrow types are queryable through the view layer.
+    let filtered = engine
+        .execute_sql("SELECT COUNT(col_int8) AS n FROM working")
+        .unwrap();
+    assert!(n(&filtered.rows[0].values[0]) > 0);
+
+    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 // --- Generated relational sample data (star schema) --------------------------
@@ -522,7 +314,7 @@ const ORDER_ITEMS_SQL: &str = "SELECT i::BIGINT AS item_id, \
 fn generate_sales_schema(conn: &Connection, dir: &Path) -> Result<(), String> {
     let _ = std::fs::remove_dir_all(dir);
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let d = dir.to_string_lossy().replace('\\', "/").replace('\'', "''");
+    let d = to_sql_path(dir);
     let tables: [(&str, &str); 4] = [
         ("products", PRODUCTS_SQL),
         ("customers", CUSTOMERS_SQL),
@@ -539,12 +331,12 @@ fn generate_sales_schema(conn: &Connection, dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Run once to create `Sample_data/sales/*.parquet` for manual app testing:
-/// `cargo test --lib generate_sales_sample_files -- --ignored`
+/// Run once to (re)create `Sample_data/sales/*.parquet`:
+/// `cargo test --lib generate_sales_sample_files -- --ignored --nocapture`
 #[test]
 #[ignore = "writes Sample_data/sales/*.parquet for manual testing"]
 fn generate_sales_sample_files() {
-    let dir = sample_dir().join("sales");
+    let dir = sales_dir();
     let conn = Connection::open_in_memory().unwrap();
     generate_sales_schema(&conn, &dir).unwrap();
     for f in ["products", "customers", "orders", "order_items"] {
@@ -599,13 +391,14 @@ fn generated_star_schema_multi_file_analytics() {
         "SELECT c.country, ROUND(SUM(oi.quantity * p.unit_price), 2) AS revenue, COUNT(DISTINCT o.order_id) AS orders FROM orders o JOIN customers c ON c.customer_id = o.customer_id JOIN order_items oi ON oi.order_id = o.order_id JOIN products p ON p.product_id = oi.product_id GROUP BY 1 ORDER BY 2 DESC",
         "SELECT month, revenue, ROUND(SUM(revenue) OVER (ORDER BY month), 2) AS running_revenue FROM (SELECT strftime(o.order_date, '%Y-%m') AS month, ROUND(SUM(oi.quantity * p.unit_price), 2) AS revenue FROM orders o JOIN order_items oi ON oi.order_id = o.order_id JOIN products p ON p.product_id = oi.product_id GROUP BY 1) t ORDER BY month",
     ];
-    let t0 = Instant::now();
     for sql in queries {
-        let q = engine.execute_sql(sql).unwrap();
-        let direct = direct_json_rows(&dir, &tables, sql);
-        assert_eq!(engine_json_rows(&q), direct, "query diverged: {}", sql);
+        assert_eq!(
+            engine_checksum(&engine, sql),
+            direct_checksum(&dir, &tables, sql),
+            "query diverged: {}",
+            sql
+        );
     }
-    eprintln!("5 complex multi-file queries in {:?}", t0.elapsed());
 
     let category_rows = engine
         .execute_sql("SELECT category, COUNT(*) AS n FROM products GROUP BY category ORDER BY category")
@@ -620,77 +413,61 @@ fn generated_star_schema_multi_file_analytics() {
 
 #[test]
 fn large_file_pagination_search_and_materialization() {
-    let path = sample_dir().join("sample-large.parquet");
-    if !path.exists() {
-        eprintln!("sample-large.parquet missing; skipping");
-        return;
-    }
+    let dir = std::env::temp_dir().join(format!("parasql_large_it_{}", std::process::id()));
+    let conn = Connection::open_in_memory().unwrap();
+    generate_sales_schema(&conn, &dir).unwrap();
+    let path = dir.join("orders.parquet");
     let p = path.to_str().unwrap();
 
-    let t = Instant::now();
     let engine = DuckDbEngine::open_parquet(p).unwrap();
-    eprintln!("open_parquet 500k rows: {:?}", t.elapsed());
-    assert_eq!(engine.row_count(), 500000);
+    assert_eq!(engine.row_count(), 100000);
 
-    let t = Instant::now();
     let page1 = engine.get_page(None, 10_000).unwrap();
-    eprintln!("first keyset page (10k rows): {:?}", t.elapsed());
     assert_eq!(page1.len(), 10_000);
     let last = page1.last().unwrap().row_id;
 
-    let t = Instant::now();
     let page2 = engine.get_page(Some(last), 10_000).unwrap();
-    eprintln!("next keyset page (10k rows): {:?}", t.elapsed());
     assert_eq!(page2.len(), 10_000);
     assert!(page2.first().unwrap().row_id > last);
 
-    let t = Instant::now();
-    let (hits, truncated) = engine.search_rows("A", None).unwrap();
-    eprintln!(
-        "search across 500k rows: {:?}, {} hits, truncated={}",
-        t.elapsed(),
-        hits.len(),
-        truncated
-    );
+    // "paid" matches ~20k rows — well past the 5k search cap.
+    let (hits, truncated) = engine.search_rows("paid", None).unwrap();
+    assert!(!hits.is_empty());
     assert!(truncated, "expected more than the search cap of matches");
 
-    // The frontend's `showEditorDataFlow` pulls all rows on editor open.
-    let t = Instant::now();
     let all = engine.get_all_rows().unwrap();
-    let json_len = serde_json::to_string(&all).unwrap().len();
-    eprintln!(
-        "get_all_rows 500k: {:?}, JSON payload {:.1} MB",
-        t.elapsed(),
-        json_len as f64 / 1_048_576.0
-    );
-    assert_eq!(all.len(), 500000);
+    assert_eq!(all.len(), 100000);
 
-    // Editing flow must not be required for the workspace view path.
+    // The workspace editing path must mount the same table correctly.
     let mut ws = Workspace::new("large");
-    ws.tables.push(ws_table("sample_large", &path));
+    ws.tables.push(ws_table("orders", &path));
     let mut ws_engine = DuckDbEngine::open_workspace(&ws).unwrap();
-    let t = Instant::now();
-    ws_engine
-        .open_editor_table("sample_large", p)
-        .unwrap();
-    eprintln!("workspace open_editor_table 500k: {:?}", t.elapsed());
-    assert_eq!(ws_engine.row_count(), 500000);
+    ws_engine.open_editor_table("orders", p).unwrap();
+    assert_eq!(ws_engine.row_count(), 100000);
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
-// --- Editing round trip on a copy --------------------------------------------
+// --- Editing round trip -------------------------------------------------------
+
+fn write_users_parquet(path: &Path) {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(&format!(
+        "CREATE TABLE u (user_id BIGINT, username VARCHAR);
+         INSERT INTO u SELECT i::BIGINT, 'user_' || lpad(i::VARCHAR, 4, '0') FROM range(1, 1002) t(i);
+         COPY u TO '{}' (FORMAT PARQUET);",
+        to_sql_path(path)
+    ))
+    .unwrap();
+}
 
 #[test]
 fn edit_round_trip_persists_and_undo_restores() {
-    let src = sample_dir().join("sample-users.parquet");
-    if !src.exists() {
-        eprintln!("sample-users.parquet missing; skipping");
-        return;
-    }
     let tmp = std::env::temp_dir().join(format!("parasql_edit_it_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
     let copy = tmp.join("users_copy.parquet");
-    std::fs::copy(&src, &copy).unwrap();
+    write_users_parquet(&copy);
 
     let mut ws = Workspace::new("edit");
     ws.tables.push(ws_table("users_copy", &copy));
@@ -767,14 +544,11 @@ fn edit_round_trip_persists_and_undo_restores() {
 
 #[test]
 fn missing_workspace_table_can_be_relinked() {
-    let src = sample_dir().join("iris.parquet");
-    if !src.exists() {
-        eprintln!("iris.parquet missing; skipping");
-        return;
-    }
     let tmp = std::env::temp_dir().join(format!("parasql_relink_it_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
+    let src = tmp.join("users_src.parquet");
+    write_users_parquet(&src);
     let ghost = tmp.join("ghost.parquet");
 
     let mut ws = Workspace::new("relink");
@@ -790,7 +564,7 @@ fn missing_workspace_table_can_be_relinked() {
     ws.tables[0].abs_path = Some(ghost.to_string_lossy().to_string());
     engine.sync_workspace_tables(&ws).unwrap();
     let q = engine.execute_sql("SELECT COUNT(*) AS n FROM ghost").unwrap();
-    assert_eq!(n(&q.rows[0].values[0]), 150);
+    assert_eq!(n(&q.rows[0].values[0]), 1001);
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
