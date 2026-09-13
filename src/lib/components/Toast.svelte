@@ -40,14 +40,14 @@
   }
 
   .toast-error {
-    border-color: #e5a5a5;
-    background: #fdf2f2;
-    color: #a12626;
+    border-color: var(--error-border, #e5a5a5);
+    background: var(--error-bg, #fdf2f2);
+    color: var(--error-text, #a12626);
   }
 
   .toast-success {
-    border-color: #a5d6a5;
-    background: #f2fdf2;
-    color: #26682b;
+    border-color: var(--success-border, #a5d6a5);
+    background: var(--success-bg, #f2fdf2);
+    color: var(--success-text, #26682b);
   }
 </style>

@@ -2,9 +2,11 @@ import { writable } from 'svelte/store';
 
 export type RowDensity = 'compact' | 'comfortable';
 export type SchemaDialect = 'duckdb' | 'postgres' | 'mysql' | 'sqlite';
+export type ThemeName = 'simple' | 'parasql';
 
 interface Settings {
   darkMode: boolean;
+  theme: ThemeName;
   pageSize: number;
   dateFormat: string;
   floatFormat: 'standard' | 'scientific';
@@ -18,6 +20,7 @@ const RECENT_LIMIT = 10;
 function getDefaultSettings(): Settings {
   return {
     darkMode: false,
+    theme: 'parasql',
     pageSize: 500,
     dateFormat: 'YYYY-MM-DD',
     floatFormat: 'standard',
@@ -34,7 +37,11 @@ function loadSettings(): Settings {
         localStorage.getItem('parasql-settings') ??
         localStorage.getItem('parquet-viewer-settings');
       if (saved) {
-        return { ...getDefaultSettings(), ...JSON.parse(saved) };
+        const raw = JSON.parse(saved) as Record<string, unknown>;
+        const merged = { ...getDefaultSettings(), ...raw } as Settings;
+        // Legacy name: the original theme was renamed to "simple"
+        if ((raw.theme as string) === 'default') merged.theme = 'simple';
+        return merged;
       }
     } catch (e) {
       console.error('Failed to load settings:', e);
@@ -56,6 +63,8 @@ function createSettingsStore() {
       } else {
         document.documentElement.classList.remove('dark');
       }
+      // Apply brand theme to document
+      document.documentElement.classList.toggle('theme-parasql', settings.theme === 'parasql');
     }
   }
 
@@ -87,6 +96,13 @@ function createSettingsStore() {
     setRowDensity: (density: RowDensity) => {
       update((val) => {
         const newVal = { ...val, rowDensity: density };
+        save(newVal);
+        return newVal;
+      });
+    },
+    setTheme: (theme: ThemeName) => {
+      update((val) => {
+        const newVal = { ...val, theme };
         save(newVal);
         return newVal;
       });

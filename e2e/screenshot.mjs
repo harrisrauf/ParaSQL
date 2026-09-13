@@ -7,6 +7,15 @@ import { connect, openWorkspace, runSql, ensureQueryTab, getPage, disconnect, WS
 const OUT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'docs', 'assets');
 
 await connect({ reload: true });
+
+// README screenshots are always captured in the ParaSQL light theme.
+await getPage().evaluate(() => {
+  const s = JSON.parse(localStorage.getItem('parasql-settings') || '{}');
+  localStorage.setItem('parasql-settings', JSON.stringify({ ...s, theme: 'parasql', darkMode: false }));
+  document.documentElement.classList.add('theme-parasql');
+  document.documentElement.classList.remove('dark');
+});
+
 await openWorkspace(WS_DEMO, { direct: true }).catch(() => {});
 await ensureQueryTab();
 await runSql(

@@ -23,26 +23,27 @@ and the feel of a spreadsheet.
 
 ---
 
-![ParaSQL workspace — SQL results across multiple Parquet tables](docs/assets/screenshot-query.png)
+![ParaSQL light theme — SQL results joined across multiple Parquet tables](docs/assets/screenshot-query.png)
 
 ## Why ParaSQL exists
 
-I was building my own embeddings pipeline. My data lived in Parquet files —
-hundreds of them, spread across folders — and my workflow was a mess of throwaway
-Python scripts, notebook cells, and one-file-at-a-time viewers that couldn't
-even join two files together.
+I started building ParaSQL while I was learning — I was creating my own
+embeddings model for a larger product I had in mind.
 
-I looked for a Parquet management tool that fit. Everything was either a CLI, a
-BI platform that wanted a server, a cloud service that wanted my data, or a
-viewer that could open one file and nothing else. Nothing let me point at a
-folder, write SQL across all of it, fix a cell, and move on.
+A surprising amount of that work wasn't modelling at all: it was sorting through,
+cleaning, and modifying a lot of Parquet data. Every tool I tried made it harder
+than it had to be. Viewers opened one file and nothing else. CLIs needed a script
+for every small change. BI platforms wanted a server, and cloud services wanted
+my data. I just wanted to open my files, look at them, fix them, and query across
+them.
 
-So I built my own. **ParaSQL is that tool.** It's free, open source, runs
-entirely on your machine, and treats a folder of Parquet files like what it
-really is: *a database you can work with.*
+So I started building the tool I needed. ParaSQL began as a single-file Parquet
+editor and grew into something bigger: a multi-file analysis and database
+management tool built on Parquet. It's free, open source, and runs entirely on
+your machine.
 
-> We didn't set out to build a Parquet viewer. We built the Excel + Postgres of
-> Parquet files — a complete data workbench.
+> I didn't just want a Parquet viewer — I wanted the Excel + Postgres of Parquet
+> files: a complete local data workbench.
 
 ## Features
 
@@ -68,8 +69,8 @@ really is: *a database you can work with.*
   Mixed schemas are unioned automatically.
 - Workspaces save to a portable **`.parasql`** file with relative paths — commit
   it, share it, reopen it on another machine.
-- Open any table **for editing** (with a size guard), tweak it in the grid, and
-  **write it back to Parquet** with your choice of compression.
+- Workspace tables are **query-only for now** — multi-file editing is on the
+  roadmap. Single files open in the full editor with atomic Parquet saves.
 
 ### 🔁 Move data freely
 - Export tables *and query results* to **Parquet, CSV, JSON, and Excel**.
@@ -83,6 +84,9 @@ really is: *a database you can work with.*
 ### 🔐 Private by design
 - Your data never leaves your computer. No accounts, no telemetry, no network calls.
 - Strict CSP, capability-scoped IPC, local-only file access.
+
+**Coming soon:** charts & pivot tables from query results, dashboards &
+notebooks, and AI-assisted dataset summaries — still local, still private.
 
 ## Performance
 
@@ -116,7 +120,7 @@ that does *all* of this in a single desktop app:
 
 | | ParaSQL | DuckDB CLI | Parquet viewers | SQL IDEs | BI platforms |
 | --- | :-: | :-: | :-: | :-: | :-: |
-| GUI data grid w/ editing | ✅ | ❌ | ✅ (read-only) | ✅ | ❌ |
+| GUI data grid w/ editing | ✅ single file | ❌ | ✅ (read-only) | ✅ | ❌ |
 | SQL with cross-file joins | ✅ | ✅ | ❌ | ⚠️ varies | ✅ |
 | Portable multi-file workspace | ✅ | ⚠️ scripts | ❌ | ❌ | ⚠️ server |
 | Undo/redo for data edits | ✅ | ❌ | ❌ | ⚠️ | ❌ |
@@ -157,8 +161,8 @@ which ships with Windows 10/11.
    GROUP BY 1
    ORDER BY 2 DESC;
    ```
-3. **Edit it.** Double-click a table in the sidebar to open it for editing, fix
-   a cell, `Ctrl+Z` to undo, then save it back to Parquet.
+3. **Edit it.** Open a single file (`File → Open File…`), double-click any cell,
+   `Ctrl+Z` to undo, then `Ctrl+S` to save it back to Parquet.
 
 ## Usage highlights
 
@@ -234,8 +238,8 @@ which ships with Windows 10/11.
   results (ECharts), save them in the workspace.
 - **v0.4 — Dashboards & notebooks:** compose saved queries and charts into
   shareable dashboards; notebook-style analysis flow.
-- **v0.5 — AI copilot:** natural-language-to-SQL and dataset summaries, bring
-  your own model. (Pro tier; the core app stays free.)
+- **v0.5 — AI copilot:** natural-language-to-SQL and dataset summaries with a
+  model you choose.
 - Ongoing: more file formats, cross-platform polish, better large-file tooling.
 
 Vote on what's next in [Discussions](https://github.com/harrisrauf/ParaSQL/discussions).
@@ -243,8 +247,7 @@ Vote on what's next in [Discussions](https://github.com/harrisrauf/ParaSQL/discu
 ## FAQ
 
 **Is it really free?**
-Yes — MIT licensed, no limits. A Pro tier for team and AI features may come
-later; everything you see today stays free and open source.
+Yes — MIT licensed, no limits, no paid tiers. Everything is free and open source.
 
 **Does it upload my data?**
 No. There is no network code, no telemetry, and no account system. Your files
@@ -253,6 +256,10 @@ are opened read/write directly from your disk.
 **Parquet only?**
 Parquet is the native format today (it is the best one). More sources are on
 the roadmap.
+
+**Can I edit files?**
+Single files, yes — fully: inline editing, undo/redo, and atomic saves.
+Workspace tables are query-only for now; multi-file editing is on the roadmap.
 
 **Can it handle a 10 GB file?**
 Querying yes — DuckDB streams Parquet efficiently. In-grid editing is guarded

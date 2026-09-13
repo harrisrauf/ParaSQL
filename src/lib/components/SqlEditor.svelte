@@ -233,7 +233,7 @@
     border: 1px solid var(--accent-color, #1a73e8);
     border-radius: 4px;
     background: var(--accent-color, #1a73e8);
-    color: white;
+    color: var(--accent-text, #fff);
     cursor: pointer;
     font-size: 12px;
     font-family: inherit;
@@ -262,10 +262,10 @@
     align-items: center;
     gap: 6px;
     padding: 6px 10px;
-    background: #fef2f2;
-    border-top: 1px solid #fecaca;
+    background: var(--error-bg, #fef2f2);
+    border-top: 1px solid var(--error-border, #fecaca);
     font-size: 12px;
-    color: #991b1b;
+    color: var(--error-text, #991b1b);
   }
 
   .error-icon {
