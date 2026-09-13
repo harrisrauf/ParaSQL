@@ -53,7 +53,28 @@ try {
     assert(await getPage().locator('.readonly-badge').isVisible(), 'no read-only badge');
   });
 
+  await step('menu dropdown survives pointer travel', async () => {
+    const page = getPage();
+    const title = page.locator('.menu-title', { hasText: 'Workspace' });
+    const box = await title.boundingBox();
+    assert(box, 'menu title not found');
+    await title.click();
+    await page.waitForSelector('.menu-dropdown .menu-item');
+    // Jiggle over the title itself — this used to close the dropdown instantly.
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.waitForTimeout(120);
+    const items = page.locator('.menu-dropdown .menu-item');
+    assert((await items.count()) > 0, 'dropdown closed while hovering the menu bar');
+    const itemBox = await items.first().boundingBox();
+    assert(itemBox, 'no dropdown items');
+    await page.mouse.move(itemBox.x + itemBox.width / 2, itemBox.y + itemBox.height / 2);
+    await page.waitForTimeout(80);
+    assert(await items.first().isVisible(), 'dropdown closed while travelling to an item');
+    await page.keyboard.press('Escape');
+  });
+
   await step('editor default SQL references a real workspace table', async () => {
+    await getPage().locator('[role=tab]', { hasText: 'Query' }).click();
     const text = await editorText();
     const m = text.match(/^SELECT \* FROM "([^"]+)" LIMIT 100;$/);
     assert(m, `unexpected default query: "${text}"`);
