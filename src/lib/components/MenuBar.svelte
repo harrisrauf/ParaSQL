@@ -188,7 +188,7 @@
       id: 'help',
       label: 'Help',
       items: [
-        { label: 'About Parquet Viewer', action: () => alert('Parquet Viewer v0.2.0\nA desktop parquet file viewer powered by DuckDB.') },
+        { label: 'About ParaSQL', action: () => alert('ParaSQL v0.2.0\nThe SQL workbench for Parquet files.\nPowered by DuckDB, built with Tauri + Svelte.') },
       ],
     },
   ]);

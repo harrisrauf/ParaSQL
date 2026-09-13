@@ -1,5 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    parquet_viewer_lib::run();
+    parasql_lib::run();
 }

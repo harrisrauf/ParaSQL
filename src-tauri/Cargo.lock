@@ -2683,6 +2683,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "parasql"
+version = "0.2.0"
+dependencies = [
+ "arrow",
+ "chrono",
+ "duckdb",
+ "rust_xlsxwriter",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tempfile",
+]
+
+[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2703,22 +2719,6 @@ dependencies = [
  "redox_syscall",
  "smallvec",
  "windows-link 0.2.1",
-]
-
-[[package]]
-name = "parquet-viewer"
-version = "0.2.0"
-dependencies = [
- "arrow",
- "chrono",
- "duckdb",
- "rust_xlsxwriter",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tempfile",
 ]
 
 [[package]]

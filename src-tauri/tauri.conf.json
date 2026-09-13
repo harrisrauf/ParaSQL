@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Parquet Viewer",
+  "productName": "ParaSQL",
   "version": "0.2.0",
-  "identifier": "com.parquet-viewer.app",
+  "identifier": "com.parasql.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,9 +12,12 @@
   "app": {
     "windows": [
       {
-        "title": "Parquet Viewer",
+        "title": "ParaSQL",
         "width": 1200,
-        "height": 800
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
+        "center": true
       }
     ],
     "security": {
@@ -25,6 +28,11 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "publisher": "Harris Rauf",
+    "copyright": "© 2026 Harris Rauf",
+    "category": "DeveloperTool",
+    "shortDescription": "The SQL workbench for Parquet files",
+    "longDescription": "ParaSQL is a local-first data workbench for Parquet files. Query folders of Parquet with DuckDB SQL, explore and edit data in a spreadsheet-grade grid with exact undo/redo, build portable multi-file workspaces, and export to Parquet, CSV, JSON, or Excel — all offline, free, and open source.",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

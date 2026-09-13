@@ -25,13 +25,16 @@ Exit code is non-zero when any non-labelled check fails. Checks whose names star
 ## Files
 
 - `lib.mjs` — shared helpers: connection, dialog seam, SQL, grid, sidebar, reporting.
-- `playwright-check.mjs` — fast smoke suite (11 checks).
-- `deep-tests.mjs` — full suite (103 checks): queries, grid, editor, panel, lifecycle,
+- `playwright-check.mjs` — fast smoke suite (12 checks).
+- `deep-tests.mjs` — full suite (107 checks): queries, grid, editor, panel, lifecycle,
   exports, Lite mode, robustness.
 - `start-dev.cmd` — dev launcher used by the suites (log: `.e2e-dev.log`).
+- `screenshot.mjs` — captures `docs/assets/screenshot-query.png` for the README.
 
 ## Notes
 
 - `Sample_data/parasql-demo.parasql` is backed up and restored by the deep suite.
-- The WebView2 profile path in `src-tauri/tauri.e2e.conf.json` is machine-specific; adjust it
-  for other machines (it only affects local E2E runs).
+- The WebView2 profile in `src-tauri/tauri.e2e.conf.json` is created at
+  `src-tauri/target/debug/e2e-profile` (relative path), so no machine-specific
+  configuration is needed. Delete that folder if the profile gets wedged.
+- npm shortcuts: `npm run dev:e2e`, `npm run e2e:smoke`, `npm run e2e:deep`.

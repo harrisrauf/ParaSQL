@@ -3,10 +3,10 @@
     "windows": [
       {
         "label": "main",
-        "title": "Parquet Viewer",
+        "title": "ParaSQL",
         "width": 1400,
         "height": 900,
-        "dataDirectory": "C:/Users/OMEN/AppData/Local/Temp/opencode/parasql-e2e-profile",
+        "center": true,
         "additionalBrowserArgs": "--remote-debugging-port=9222"
       }
     ]

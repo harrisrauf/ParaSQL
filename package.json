@@ -1,8 +1,28 @@
 {
-  "name": "parquet-viewer",
+  "name": "parasql",
   "private": true,
   "version": "0.2.0",
   "type": "module",
+  "description": "The SQL workbench for Parquet files — query, explore, edit, and export data from any folder of Parquet.",
+  "license": "MIT",
+  "author": "Harris Rauf",
+  "homepage": "https://github.com/harrisrauf/ParaSQL",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/harrisrauf/ParaSQL.git"
+  },
+  "bugs": {
+    "url": "https://github.com/harrisrauf/ParaSQL/issues"
+  },
+  "keywords": [
+    "parquet",
+    "duckdb",
+    "sql",
+    "data-workbench",
+    "tauri",
+    "svelte",
+    "data-analysis"
+  ],
   "scripts": {
     "dev": "vite",
     "build": "vite build",
