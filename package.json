@@ -31,7 +31,7 @@
     "check": "svelte-check --tsconfig ./tsconfig.json"
   },
   "dependencies": {
-    "@tanstack/svelte-virtual": "^3.13.0",
+    "@tanstack/svelte-virtual": "^3.13.39",
     "@tauri-apps/api": "^2.11.0",
     "@tauri-apps/plugin-dialog": "^2.7.1"
   },
