@@ -56,12 +56,29 @@ export interface SavedQuery {
   sql: string;
 }
 
+export type ChartType = 'bar' | 'line' | 'area' | 'pie' | 'scatter';
+
+/** A saved chart: the query that produced it plus the visual mapping. */
+export interface ChartConfig {
+  id: string;
+  name: string;
+  sql: string;
+  type: ChartType;
+  /** Category / x-axis column name */
+  x: string;
+  /** Value / y-axis column name */
+  y: string;
+  /** Optional column that splits the data into series */
+  series: string | null;
+  updated_at: number;
+}
+
 export interface Workspace {
   version: number;
   name: string;
   tables: WorkspaceTable[];
   saved_queries: SavedQuery[];
-  charts: unknown[];
+  charts: ChartConfig[];
   dashboards: unknown[];
   notebooks: unknown[];
   edit_size_limit_mb: number | null;

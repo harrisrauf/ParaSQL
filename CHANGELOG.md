@@ -7,9 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Chart builder** — turn the latest query result into a bar, line, area, pie,
+  or scatter chart, split by a column, and save charts into the `.parasql`
+  workspace (ECharts).
+
 ### Planned
 
-- Chart builder and pivot tables (ECharts)
+- Pivot tables
 - Dashboards and notebooks
 - AI copilot (bring your own model)
 - Cross-platform release builds

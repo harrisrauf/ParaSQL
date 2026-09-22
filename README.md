@@ -77,6 +77,11 @@ your machine.
 - Parquet codecs: **SNAPPY, ZSTD, GZIP, LZ4, BROTLI**, uncompressed.
 - Every write is **atomic** — a failed export never corrupts an existing file.
 
+### 📈 Charts from query results
+- Turn any query result into a **bar, line, area, pie, or scatter** chart.
+- Choose X/Y columns and split series by a column — charts **save into the
+  workspace** and re-run their query when you reopen it.
+
 ### ⚡ Native speed, tiny footprint
 - Rust + Tauri 2 — no Electron, no JVM, no server. Installers around **10–15 MB**.
 - Cold-starts in well under a second; queries stream from DuckDB as Arrow batches.
@@ -85,8 +90,8 @@ your machine.
 - Your data never leaves your computer. No accounts, no telemetry, no network calls.
 - Strict CSP, capability-scoped IPC, local-only file access.
 
-**Coming soon:** charts & pivot tables from query results, dashboards &
-notebooks, and AI-assisted dataset summaries — still local, still private.
+**Coming soon:** pivot tables, dashboards & notebooks, and AI-assisted dataset
+summaries — still local, still private.
 
 ## Performance
 
@@ -236,8 +241,8 @@ and Linux the same command produces `.dmg` / `.AppImage` / `.deb`.
 
 ## Roadmap
 
-- **v0.3 — Charts & pivot:** build charts and pivot tables straight from query
-  results (ECharts), save them in the workspace.
+- **v0.3 — Charts (shipped) & pivot:** chart builder for query results
+  (bar/line/area/pie/scatter) saved in the workspace; pivot tables next.
 - **v0.4 — Dashboards & notebooks:** compose saved queries and charts into
   shareable dashboards; notebook-style analysis flow.
 - **v0.5 — AI copilot:** natural-language-to-SQL and dataset summaries with a

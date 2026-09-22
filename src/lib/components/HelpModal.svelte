@@ -43,8 +43,14 @@
     },
     {
       icon: 'sparkle',
+      title: 'Chart your results',
+      body: 'After running a query, open the Charts tab: pick a chart type (bar, line, area, pie, scatter), choose the X and Y columns, optionally split by a series — then save the chart into your workspace.',
+      note: 'Saved charts re-run their query and redraw whenever you reopen the workspace.',
+    },
+    {
+      icon: 'sparkle',
       title: 'Coming soon',
-      body: 'Charts and pivot tables built from query results, dashboards and notebooks to compose them, and AI-assisted dataset summaries — all still local and private.',
+      body: 'Pivot tables, dashboards and notebooks to compose your charts, and AI-assisted dataset summaries — all still local and private.',
     },
   ];
 

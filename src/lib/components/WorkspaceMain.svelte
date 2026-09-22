@@ -1,6 +1,7 @@
 <script lang="ts">
 import SqlEditor from './SqlEditor.svelte';
 import DataGrid from './DataGrid.svelte';
+import ChartBuilder from './ChartBuilder.svelte';
 import { workspaceStore } from '../stores/workspace';
 import { tableStore } from '../stores/table';
 import * as a from '../actions';
@@ -75,13 +76,7 @@ function setView(v: 'query' | 'data' | 'charts') {
         </div>
       {/if}
     {:else}
-      <div class="placeholder">
-        <div class="placeholder-title">Charts</div>
-        <div class="placeholder-body">
-          The chart builder lands next: pick a query result, choose a chart
-          type (bar / line / scatter / pie), and save it to the workspace.
-        </div>
-      </div>
+      <ChartBuilder />
     {/if}
   </div>
 </div>
@@ -159,28 +154,5 @@ function setView(v: 'query' | 'data' | 'charts') {
     color: var(--text-secondary, #888);
     border: 1px dashed var(--border-color, #d0d0d0);
     border-radius: 6px;
-  }
-
-  .placeholder {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    color: var(--text-secondary, #888);
-  }
-
-  .placeholder-title {
-    font-size: 16px;
-    font-weight: 600;
-    color: var(--text-primary, #333);
-  }
-
-  .placeholder-body {
-    font-size: 12px;
-    max-width: 420px;
-    text-align: center;
-    line-height: 1.6;
   }
 </style>

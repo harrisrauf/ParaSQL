@@ -4,7 +4,7 @@ import * as cmds from './commands';
 import { tableStore, displayedRows, selectedRowIds, initialLoadThreshold } from './stores/table';
 import { settings } from './stores/settings';
 import { notify } from './stores/ui';
-import type { RowData } from './types';
+import type { RowData, ChartConfig } from './types';
 
 function pushRecent(path: string | null | undefined) {
   if (path) settings.pushRecentFile(path);
@@ -525,6 +525,30 @@ export async function saveWorkspaceAsFlow(): Promise<boolean> {
     console.error('Failed to save workspace:', e);
     return false;
   }
+}
+
+// --- Charts ---
+
+export async function saveChartFlow(config: ChartConfig): Promise<boolean> {
+  const s = get(workspaceStore);
+  if (!s.doc) {
+    notify('Open a workspace to save charts.', 'error');
+    return false;
+  }
+  const charts = [...s.doc.charts.filter(c => c.id !== config.id), config];
+  workspaceStore.update(v => (v.doc ? { ...v, doc: { ...v.doc, charts } } : v));
+  const ok = await saveWorkspaceFlow();
+  if (ok) notify(`Saved chart "${config.name}".`, 'success');
+  else notify('Chart saved in the workspace — use Workspace → Save Workspace to persist it.', 'info');
+  return ok;
+}
+
+export async function deleteChartFlow(id: string): Promise<boolean> {
+  const s = get(workspaceStore);
+  if (!s.doc) return false;
+  const charts = s.doc.charts.filter(c => c.id !== id);
+  workspaceStore.update(v => (v.doc ? { ...v, doc: { ...v.doc, charts } } : v));
+  return saveWorkspaceFlow();
 }
 
 export async function addTableFlow(): Promise<boolean> {
